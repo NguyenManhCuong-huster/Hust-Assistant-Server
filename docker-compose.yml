@@ -1,0 +1,63 @@
+services:
+
+  postgres_db:
+    image: postgres:15-alpine
+    container_name: aggregator_db
+    restart: always
+    environment:
+      POSTGRES_USER:     admin
+      POSTGRES_PASSWORD: mysecretpassword
+      POSTGRES_DB:       notification_aggregator
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data           # ← named, không phải ./
+      - ./database/init_schema.sql:/docker-entrypoint-initdb.d/init_schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d notification_aggregator"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin_aggregator
+    restart: always
+    environment:
+      PGADMIN_DEFAULT_EMAIL:    admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "8080:80"
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin                    # ← named
+
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: aggregator_server
+    restart: always
+    env_file:
+      - ./server/.env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_HOST: postgres_db
+      DB_PORT: 5432
+      DB_NAME: notification_aggregator
+      DB_USER: admin
+      DB_PASSWORD: mysecretpassword
+      JWT_EXPIRES_IN: 7d
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+
+# ─── Khai báo named volumes ở dưới cùng ───
+volumes:
+  postgres_data:
+  pgadmin_data:

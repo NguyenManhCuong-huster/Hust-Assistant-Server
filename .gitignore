@@ -1,0 +1,6 @@
+node_modules/
+.env
+*.log
+postgres_data/
+pgadmin_data/
+package-lock.json
