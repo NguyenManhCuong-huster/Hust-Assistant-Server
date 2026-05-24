@@ -1,23 +1,3 @@
-/**
- * src/services/aiService.js
- *
- * Wrapper cho Google Gemini API. Mọi tính năng AI của app (AI mail,
- * AI gợi ý task, ...) đều gọi qua đây — không gọi trực tiếp Gemini ở
- * route handler.
- *
- * THAY ĐỔI 2025-05-04:
- *   - Hỗ trợ function calling theo spec của Google Gemini.
- *   - chat() giờ nhận thêm `tools` (function declarations) và `toolExecutor`
- *     (callback chạy tool trong server). Khi model gọi tool, ta execute
- *     rồi gửi functionResponse ngược về model, lặp đến khi model trả
- *     text reply (hoặc đến maxIterations).
- *   - Gọi chat() không truyền tools → behavior y hệt như cũ.
- *
- * ENV CẦN THIẾT:
- *   GEMINI_API_KEY   — API key từ https://aistudio.google.com/apikey
- *   GEMINI_MODEL     — (optional) mặc định 'gemini-3.1-flash-lite'
- */
-
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 const getModel  = () => process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';

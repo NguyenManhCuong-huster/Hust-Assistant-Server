@@ -1,13 +1,8 @@
-/**
- * src/services/emailSyncService.js
- *
- * THAY ĐỔI 2025-05-02: 1 row = 1 message. Insert mỗi message thành 1 row.
- */
-
 import { query, getClient }              from '../config/db.js';
 import { decrypt, encrypt }              from '../config/crypto.js';
 import { fetchNewEmails, refreshAccessToken,
-         extractTokens }                 from './gmailService.js';
+         extractTokens, getAttachmentBytes } from './gmailService.js';
+import * as att                          from './attachmentService.js';
 
 const DEFAULT_SINCE_FALLBACK_DAYS = 7;
 
@@ -39,18 +34,19 @@ const getLastSyncTime = async (accountId) => {
 /**
  * upsertEmails: 1 row = 1 message Gmail.
  *
- * ON CONFLICT (account_id, gmail_message_id) → message đã tồn tại, update
- * các field có thể đổi (vd subject thường không đổi, nhưng body_text có thể
- * đã được Gmail update sau cùng — refresh để chắc).
+ * Trả mảng `{ emailId, gmailMessageId, attachments }` cho TẤT CẢ message
+ * (cả mới insert lẫn update) — để caller decide có download attachment hay không.
+ * Hiện tại: download ngay nếu attachment row chưa có storage_path.
  */
 const upsertEmails = async (client, accountId, messages) => {
-  const inserted = [];
+  const out = [];
   for (const msg of messages) {
     const {
       gmail_message_id, gmail_thread_id,
       sender, recipient, subject, snippet,
       body_text, body_html,
       deep_link_intent, received_at,
+      attachments,
     } = msg;
 
     const res = await client.query(
@@ -78,9 +74,78 @@ const upsertEmails = async (client, accountId, messages) => {
         deep_link_intent, received_at,
       ],
     );
-    if (res.rows[0]?.inserted) inserted.push(res.rows[0].id);
+    out.push({
+      emailId:          res.rows[0].id,
+      inserted:         res.rows[0].inserted,
+      gmailMessageId:   gmail_message_id,
+      attachments:      attachments ?? [],
+    });
   }
-  return inserted;
+  return out;
+};
+
+/**
+ * Cho mỗi attachment trong email, kiểm tra DB:
+ *   • Đã có row + đã có storage_path → bỏ qua (đã download trước đó).
+ *   • Chưa có / chưa download → fetch bytes từ Gmail + lưu đĩa + upsert.
+ *
+ * Resilient: 1 file fail → log warn, không throw.
+ */
+const downloadAttachments = async (accessToken, items) => {
+  let downloaded = 0;
+  let skipped    = 0;
+  let failed     = 0;
+
+  for (const it of items) {
+    if (!it.attachments || it.attachments.length === 0) continue;
+
+    for (const a of it.attachments) {
+      try {
+        // Upsert metadata trước (có attachments id cho UI ngay cả khi
+        // download fail). storage_path để null lúc đầu.
+        await att.upsertMetadata({
+          ownerType:         att.OWNER_EMAIL,
+          ownerId:           it.emailId,
+          fileName:          a.filename,
+          mimeType:          a.mimeType,
+          sizeBytes:         a.sizeBytes,
+          gmailAttachmentId: a.gmailAttachmentId,
+          isInline:          a.isInline,
+        });
+
+        // Check: đã có file trên đĩa chưa?
+        const existing = await query(
+          `SELECT storage_path FROM attachments
+            WHERE owner_type = 'EMAIL' AND owner_id = $1
+              AND gmail_attachment_id = $2 AND is_deleted = FALSE`,
+          [it.emailId, a.gmailAttachmentId],
+        );
+        if (existing.rows[0]?.storage_path) { skipped++; continue; }
+
+        // Cap nhanh theo declared size
+        if (a.sizeBytes && a.sizeBytes > att.getMaxBytes()) {
+          console.warn(`[EmailSync] skip large attachment ${a.filename} (${a.sizeBytes}b)`);
+          skipped++; continue;
+        }
+
+        const buf = await getAttachmentBytes(accessToken, it.gmailMessageId, a.gmailAttachmentId);
+        await att.saveBuffer({
+          ownerType:         att.OWNER_EMAIL,
+          ownerId:           it.emailId,
+          fileName:          a.filename,
+          mimeType:          a.mimeType,
+          buffer:            buf,
+          gmailAttachmentId: a.gmailAttachmentId,
+          isInline:          a.isInline,
+        });
+        downloaded++;
+      } catch (e) {
+        console.warn(`[EmailSync] attachment fail ${a.filename}: ${e.message}`);
+        failed++;
+      }
+    }
+  }
+  return { downloaded, skipped, failed };
 };
 
 const updateAccessToken = async (accountId, oldBlob, newAccessToken) => {
@@ -148,18 +213,28 @@ export const syncEmailsForUser = async (userId = null) => {
       }
 
       const client = await getClient();
+      let upserted;
       try {
         await client.query('BEGIN');
-        const inserted = await upsertEmails(client, account.id, emails);
+        upserted = await upsertEmails(client, account.id, emails);
         await client.query('COMMIT');
         result.status     = 'ok';
-        result.new_emails = inserted.length;
+        result.new_emails = upserted.filter((u) => u.inserted).length;
         result.since      = sinceDate.toISOString();
       } catch (dbErr) {
         await client.query('ROLLBACK');
         throw dbErr;
       } finally {
         client.release();
+      }
+
+      // ── Attachments: download SAU khi commit email rows ──
+      // Quan trọng: ngoài transaction để 1 file fail không rollback email.
+      if (upserted && upserted.length > 0) {
+        const attRes = await downloadAttachments(accessToken, upserted);
+        result.attachments_downloaded = attRes.downloaded;
+        result.attachments_failed     = attRes.failed;
+        result.attachments_skipped    = attRes.skipped;
       }
 
     } catch (err) {
@@ -186,7 +261,10 @@ export const startPolling = (intervalMs = 5 * 60 * 1000) => {
     try {
       const r = await syncEmailsForUser(null);
       const total = r.accounts.reduce((s, a) => s + (a.new_emails ?? 0), 0);
-      if (total > 0) console.log(`[EmailSync] ${total} new email(s) fetched`);
+      const files = r.accounts.reduce((s, a) => s + (a.attachments_downloaded ?? 0), 0);
+      if (total > 0 || files > 0) {
+        console.log(`[EmailSync] ${total} new email(s), ${files} attachment(s) fetched`);
+      }
     } catch (err) {
       console.error('[EmailSync] Poll error:', err.message);
     }

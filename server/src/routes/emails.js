@@ -1,17 +1,8 @@
-/**
- * src/routes/emails.js
- *
- * THAY ĐỔI 2025-05-02:
- *  - GET /api/emails: list dedup theo thread (UI list).
- *  - GET /api/emails/all: trả TẤT CẢ messages (không dedup) — dành cho client
- *    sync về Room. Sau khi cache full, click email render thread instant.
- *  - GET /api/emails/:id/thread: query messages cùng thread, time <= anchor.
- */
-
 import express                       from 'express';
 import { requireAuth }               from '../middleware/authMiddleware.js';
 import { query }                     from '../config/db.js';
 import { syncEmailsForUser }         from '../services/emailSyncService.js';
+import * as att                      from '../services/attachmentService.js';
 
 const router = express.Router();
 
@@ -46,7 +37,18 @@ const buildWhereClauses = (req, startIdx) => {
   return { where: conditions.join(' AND '), params, nextIdx: idx };
 };
 
-// ─── GET /api/emails — UI list, dedup theo thread ──────
+/** Bulk-fetch attachments cho 1 list email rows, gán vào row.attachments. */
+const attachAttachments = async (rows) => {
+  if (!rows || rows.length === 0) return rows;
+  const ids = rows.map((r) => r.id);
+  const map = await att.listForOwnersBulk(att.OWNER_EMAIL, ids);
+  for (const row of rows) {
+    row.attachments = map.get(row.id) ?? [];
+  }
+  return rows;
+};
+
+// ─── GET /api/emails ───────────────────────────────────
 router.get('/', requireAuth, async (req, res, next) => {
   try {
     const safePage  = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
@@ -57,9 +59,6 @@ router.get('/', requireAuth, async (req, res, next) => {
     let idx = built.nextIdx;
     const dataParams  = [...built.params, safeLimit, offset];
 
-    // Postgres DISTINCT ON: với mỗi (thread_id), giữ row có ORDER BY đầu tiên
-    // (= received_at DESC → message mới nhất). COALESCE để email không có
-    // thread_id thì coi mỗi message là thread riêng.
     const dataSql = `
       SELECT * FROM (
         SELECT DISTINCT ON (COALESCE(e.gmail_thread_id, e.gmail_message_id))
@@ -89,6 +88,8 @@ router.get('/', requireAuth, async (req, res, next) => {
       query(countSql, built.params),
     ]);
 
+    await attachAttachments(dataRes.rows);
+
     const total     = Number.parseInt(countRes.rows[0].count, 10);
     const totalPage = Math.ceil(total / safeLimit);
 
@@ -100,7 +101,7 @@ router.get('/', requireAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// ─── GET /api/emails/all — KHÔNG dedup, dùng cho client sync ──
+// ─── GET /api/emails/all ──────────────────────────────
 router.get('/all', requireAuth, async (req, res, next) => {
   try {
     const safePage  = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
@@ -128,6 +129,8 @@ router.get('/all', requireAuth, async (req, res, next) => {
         built.params,
       ),
     ]);
+
+    await attachAttachments(dataRes.rows);
 
     const total     = Number.parseInt(countRes.rows[0].count, 10);
     const totalPage = Math.ceil(total / safeLimit);
@@ -161,6 +164,7 @@ router.get('/:id/thread', requireAuth, async (req, res, next) => {
          WHERE e.id = $1`,
         [anchor.id],
       );
+      await attachAttachments(single.rows);
       return res.json({
         success: true,
         data: {
@@ -184,6 +188,8 @@ router.get('/:id/thread', requireAuth, async (req, res, next) => {
       [req.user.id, anchor.gmail_thread_id, anchor.account_id, anchor.received_at],
     );
 
+    await attachAttachments(threadRes.rows);
+
     res.json({
       success: true,
       data: {
@@ -206,7 +212,25 @@ router.get('/:id', requireAuth, async (req, res, next) => {
       [req.params.id, req.user.id],
     );
     if (!r.rows[0]) return res.status(404).json({ success: false, message: 'Email not found.' });
+    r.rows[0].attachments = await att.listForOwner(att.OWNER_EMAIL, r.rows[0].id);
     res.json({ success: true, data: r.rows[0] });
+  } catch (err) { next(err); }
+});
+
+// ─── GET /api/emails/:id/attachments ───────────────────
+router.get('/:id/attachments', requireAuth, async (req, res, next) => {
+  try {
+    const ok = await query(
+      `SELECT 1 FROM emails e
+         JOIN user_account_cross_ref uac ON uac.account_id = e.account_id
+        WHERE e.id = $1 AND uac.user_id = $2`,
+      [req.params.id, req.user.id],
+    );
+    if (!ok.rows[0]) {
+      return res.status(404).json({ success: false, message: 'Email không tồn tại hoặc không có quyền.' });
+    }
+    const rows = await att.listForOwner(att.OWNER_EMAIL, req.params.id);
+    res.json({ success: true, data: rows });
   } catch (err) { next(err); }
 });
 

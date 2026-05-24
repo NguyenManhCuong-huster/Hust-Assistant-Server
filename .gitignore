@@ -4,3 +4,4 @@ node_modules/
 postgres_data/
 pgadmin_data/
 package-lock.json
+uploads/

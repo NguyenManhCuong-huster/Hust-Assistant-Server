@@ -11,7 +11,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data           # ← named, không phải ./
+      - postgres_data:/var/lib/postgresql/data
       - ./database/init_schema.sql:/docker-entrypoint-initdb.d/init_schema.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin -d notification_aggregator"]
@@ -32,7 +32,7 @@ services:
       postgres_db:
         condition: service_healthy
     volumes:
-      - pgadmin_data:/var/lib/pgadmin                    # ← named
+      - pgadmin_data:/var/lib/pgadmin
 
   server:
     build:
@@ -51,13 +51,21 @@ services:
       DB_USER: admin
       DB_PASSWORD: mysecretpassword
       JWT_EXPIRES_IN: 7d
+      # ── MỚI: thư mục lưu file đính kèm bên trong container ──
+      UPLOAD_ROOT: /app/uploads
+      # Giới hạn 1 file để tránh DoS đĩa. Mặc định 25 MB.
+      MAX_ATTACHMENT_BYTES: 26214400
     ports:
       - "3000:3000"
+    volumes:
+      # ── MỚI: persist file đính kèm. Bind mount để file ở host
+      # cũng truy cập được (tiện debug, backup). Đổi sang named volume
+      # nếu deploy production và host filesystem không cần thấy. ──
+      - ./uploads:/app/uploads
     depends_on:
       postgres_db:
         condition: service_healthy
 
-# ─── Khai báo named volumes ở dưới cùng ───
 volumes:
   postgres_data:
   pgadmin_data:

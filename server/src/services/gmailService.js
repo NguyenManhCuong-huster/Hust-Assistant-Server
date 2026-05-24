@@ -1,13 +1,3 @@
-/**
- * src/services/gmailService.js
- *
- * THAY ĐỔI 2025-05-02:
- *  - Schema: 1 row email = 1 message → fetchNewEmails trả về MỌI message
- *    (không dedup theo thread).
- *  - parseFullMessage shape khớp cột DB: gmail_message_id, gmail_thread_id,
- *    sender, recipient, subject, body_text, body_html, ...
- */
-
 import { query }            from '../config/db.js';
 import { encrypt, decrypt } from '../config/crypto.js';
 
@@ -64,6 +54,13 @@ const decodeBase64Url = (b64) => {
   return Buffer.from(standard, 'base64').toString('utf-8');
 };
 
+/** Decode base64url thành Buffer (cho bytes file). */
+const decodeBase64UrlToBuffer = (b64) => {
+  if (!b64) return Buffer.alloc(0);
+  const standard = b64.replace(/-/g, '+').replace(/_/g, '/');
+  return Buffer.from(standard, 'base64');
+};
+
 const extractBody = (payload) => {
   if (!payload) return { text: '', html: '' };
   if (!payload.parts || payload.parts.length === 0) {
@@ -87,9 +84,62 @@ const extractBody = (payload) => {
 };
 
 /**
- * parseFullMessage — trả shape khớp với cột DB. Dùng cả lúc sync và lúc
- * fetch thread cho route /thread (giờ đọc DB nên route không gọi nữa,
- * nhưng giữ nguyên cho future use case).
+ * Tìm header "Content-Disposition" hoặc "Content-ID" của 1 part.
+ * Trả về { isInline: bool } — true nếu part có Content-Disposition: inline
+ * hoặc có Content-ID (= image embed trong HTML).
+ */
+const partDisposition = (part) => {
+  const headers = part.headers ?? [];
+  const disp = headers.find((h) => h.name.toLowerCase() === 'content-disposition')?.value ?? '';
+  const cid  = headers.find((h) => h.name.toLowerCase() === 'content-id')?.value;
+  const isInline = /inline/i.test(disp) || !!cid;
+  return { isInline };
+};
+
+/**
+ * Walk payload, thu thập attachments. 1 part được coi là attachment khi:
+ *   • `filename` không rỗng — Gmail set thuộc tính này cho mọi part có file name
+ *     trong Content-Disposition.
+ *   • `body.attachmentId` tồn tại — Gmail dùng để fetch bytes (không inline data).
+ *
+ * KHÔNG decode bytes ở đây. Bytes được fetch sau qua [getAttachmentBytes].
+ */
+const extractAttachments = (payload) => {
+  const out = [];
+  const walk = (parts) => {
+    if (!parts) return;
+    for (const p of parts) {
+      if (p.parts && p.parts.length > 0) walk(p.parts);
+      const filename       = p.filename;
+      const attachmentId   = p.body?.attachmentId;
+      if (!filename || !attachmentId) continue;
+      const { isInline } = partDisposition(p);
+      out.push({
+        filename,
+        mimeType:          p.mimeType ?? null,
+        sizeBytes:         p.body?.size ?? null,
+        gmailAttachmentId: attachmentId,
+        isInline,
+      });
+    }
+  };
+  if (payload?.parts) walk(payload.parts);
+  // Edge case: payload không có parts nhưng có filename (rare — single-part attachment)
+  if (payload && payload.filename && payload.body?.attachmentId) {
+    const { isInline } = partDisposition(payload);
+    out.push({
+      filename:          payload.filename,
+      mimeType:          payload.mimeType ?? null,
+      sizeBytes:         payload.body?.size ?? null,
+      gmailAttachmentId: payload.body.attachmentId,
+      isInline,
+    });
+  }
+  return out;
+};
+
+/**
+ * parseFullMessage — trả shape khớp với cột DB + attachments.
  */
 const parseFullMessage = (msg) => {
   const { text, html } = extractBody(msg.payload);
@@ -111,6 +161,7 @@ const parseFullMessage = (msg) => {
     body_html:        html,
     deep_link_intent: buildGmailWebLink(linkId),
     received_at:      receivedAt,
+    attachments:      extractAttachments(msg.payload),
   };
 };
 
@@ -134,12 +185,25 @@ export const getFullMessage = async (accessToken, messageId) => {
 };
 
 /**
- * fetchNewEmails — pull mọi message mới từ sau sinceDate, KÈM body.
+ * Fetch bytes của 1 attachment. Trả Buffer.
  *
- * 1 message = 1 row sau khi upsertEmails. Server không dedup theo thread —
- * khi list email, route /api/emails sẽ dedup ở SQL.
+ * Endpoint Gmail: GET /messages/{id}/attachments/{attId}
+ *   → response.data = base64url string.
+ */
+export const getAttachmentBytes = async (accessToken, messageId, attachmentId) => {
+  const data = await gmailFetch(
+    accessToken,
+    `/messages/${messageId}/attachments/${attachmentId}`,
+    {},
+  );
+  return decodeBase64UrlToBuffer(data.data);
+};
+
+/**
+ * fetchNewEmails — pull mọi message mới từ sau sinceDate, KÈM body + attachments
+ * metadata. Bytes attachment KHÔNG download ở đây.
  *
- * Cost: 50 message = 50 + 1 = 51 API call. Free quota Gmail rất rộng.
+ * Cost: 50 message = 50 + 1 = 51 API call.
  */
 export const fetchNewEmails = async (accessToken, sinceDate, maxResults = 50) => {
   const ids = await listMessageIds(accessToken, sinceDate, maxResults);

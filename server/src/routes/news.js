@@ -3,17 +3,24 @@ import express from 'express';
 import { requireAuth } from '../middleware/authMiddleware.js';
 import { query }       from '../config/db.js';
 import { syncNews }    from '../services/newsScrapeService.js';
+import * as att        from '../services/attachmentService.js';
 
 const router = express.Router();
 router.use(requireAuth);
 
+/** Helper: gắn attachments vào mỗi row của 1 list news. */
+const attachAttachments = async (newsRows) => {
+  if (!newsRows || newsRows.length === 0) return newsRows;
+  const ids = newsRows.map((r) => r.id);
+  const map = await att.listForOwnersBulk(att.OWNER_NEWS, ids);
+  for (const row of newsRows) {
+    row.attachments = map.get(row.id) ?? [];
+  }
+  return newsRows;
+};
+
 // ─────────────────────────────────────────────────────────
 // GET /api/news
-// Query:
-//   ?kind=NEWS|PLAN   — lọc loại (default: tất cả)
-//   ?tag=CTSV         — lọc theo tag
-//   ?q=keyword        — search trong title/summary
-//   ?page=1&limit=20  — phân trang
 // ─────────────────────────────────────────────────────────
 router.get('/', async (req, res, next) => {
   try {
@@ -62,6 +69,8 @@ router.get('/', async (req, res, next) => {
       query(`SELECT COUNT(*) FROM news n WHERE ${where}`, params),
     ]);
 
+    await attachAttachments(list.rows);
+
     const total     = Number.parseInt(count.rows[0].count, 10);
     const totalPage = Math.ceil(total / safeLimit);
     res.json({
@@ -79,7 +88,7 @@ router.get('/', async (req, res, next) => {
 });
 
 // ─────────────────────────────────────────────────────────
-// GET /api/news/:id  — chi tiết kèm summary (full plain text)
+// GET /api/news/:id
 // ─────────────────────────────────────────────────────────
 router.get('/:id', async (req, res, next) => {
   try {
@@ -93,18 +102,43 @@ router.get('/:id', async (req, res, next) => {
       [req.params.id],
     );
     if (!r.rows[0]) return res.status(404).json({ success: false, message: 'Không tìm thấy.' });
-    res.json({ success: true, data: r.rows[0] });
+
+    const row = r.rows[0];
+    row.attachments = await att.listForOwner(att.OWNER_NEWS, row.id);
+
+    res.json({ success: true, data: row });
   } catch (err) { next(err); }
 });
 
 // ─────────────────────────────────────────────────────────
-// POST /api/news/scrape  — trigger thủ công
+// GET /api/news/:id/attachments
+// ─────────────────────────────────────────────────────────
+router.get('/:id/attachments', async (req, res, next) => {
+  try {
+    const exists = await query(
+      'SELECT 1 FROM news WHERE id = $1 AND is_deleted = FALSE',
+      [req.params.id],
+    );
+    if (!exists.rows[0]) {
+      return res.status(404).json({ success: false, message: 'News không tồn tại.' });
+    }
+    const rows = await att.listForOwner(att.OWNER_NEWS, req.params.id);
+    res.json({ success: true, data: rows });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────
+// POST /api/news/scrape
 // ─────────────────────────────────────────────────────────
 router.post('/scrape', async (req, res, next) => {
   try {
-    const { refetch = false, limit = 50 } = req.body ?? {};
+    const { refetch = false, limit = 50, skipFiles = false } = req.body ?? {};
     const safeLimit = Math.min(100, Math.max(1, Number.parseInt(limit, 10) || 50));
-    const result    = await syncNews({ refetchExisting: !!refetch, limit: safeLimit });
+    const result    = await syncNews({
+      refetchExisting: !!refetch,
+      limit:           safeLimit,
+      skipFiles:       !!skipFiles,
+    });
     res.json({ success: true, ...result });
   } catch (err) { next(err); }
 });

@@ -1,22 +1,3 @@
-/**
- * src/routes/accounts.js
- *
- * FIX (2025-05-02): bổ sung accessType + prompt khi gọi passport.authenticate().
- *
- * Theo passport-google-oauth20, các option này PHẢI được truyền vào
- * `authenticate()`, KHÔNG phải lúc tạo Strategy. Đặt trong Strategy options
- * → bị ignore → Google không cấp refresh_token → access_token expire sau 1h
- * → mọi request Gmail API tiếp theo đều fail.
- *
- * Hai thay đổi quan trọng:
- *  1. accessType: 'offline'  → Google trả refresh_token cùng access_token.
- *  2. prompt: 'consent'      → Buộc hiện consent screen, đảm bảo refresh_token
- *                              được cấp ngay cả khi user đã từng authorize app
- *                              này trước đó. (Mặc định Google chỉ cấp 1 lần.)
- *  3. Thêm 'gmail.readonly' vào scope của route — Strategy có scope này nhưng
- *     khi authenticate() truyền `scope` riêng sẽ override → cần bổ sung.
- */
-
 import express from 'express';
 
 import passport                     from '../config/passport.js';

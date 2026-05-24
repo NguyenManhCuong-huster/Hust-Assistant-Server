@@ -1,26 +1,10 @@
--- ═════════════════════════════════════════════════════════════
---  init_schema.sql — schema khởi tạo cho TodoApp
---
---  THAY ĐỔI 2025-05-02:
---    Bảng emails giờ là 1 ROW = 1 MESSAGE (không phải 1 thread).
---
---  THAY ĐỔI 2026-05-07:
---    • tasks: thêm priority + location.
---      Migration cho DB đã tồn tại: 003.
---
---    • news: scraper HUST CTT, cào CẢ TIN TỨC và KẾ HOẠCH vào cùng bảng,
---      phân biệt qua cột `kind` ('NEWS' | 'PLAN'). UNIQUE(article_url) +
---      UNIQUE(news_sources.name) cho upsert idempotent. Seed nguồn HUST CTT.
---      KHÔNG lưu HTML — chỉ plain text trong summary.
---      Migration: 004 + 005 + 006.
--- ═════════════════════════════════════════════════════════════
-
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
-CREATE TYPE provider_type  AS ENUM ('GMAIL', 'OUTLOOK', 'CTT');
-CREATE TYPE task_category  AS ENUM ('TODO', 'CLASS', 'EXAM');
-CREATE TYPE source_origin  AS ENUM ('MANUAL', 'EMAIL', 'NEWS', 'CTT');
-CREATE TYPE account_status AS ENUM ('ACTIVE', 'EXPIRED', 'REVOKED');
+CREATE TYPE provider_type    AS ENUM ('GMAIL', 'OUTLOOK', 'CTT');
+CREATE TYPE task_category    AS ENUM ('TODO', 'CLASS', 'EXAM');
+CREATE TYPE source_origin    AS ENUM ('MANUAL', 'EMAIL', 'NEWS', 'CTT');
+CREATE TYPE account_status   AS ENUM ('ACTIVE', 'EXPIRED', 'REVOKED');
+CREATE TYPE attachment_owner AS ENUM ('NEWS', 'EMAIL');                 -- MỚI
 
 -- ═════════════════════════════════════════════════════════════ USERS
 CREATE TABLE "users" (
@@ -127,6 +111,55 @@ CREATE TABLE "emails" (
 CREATE INDEX idx_emails_account_id  ON "emails"(account_id);
 CREATE INDEX idx_emails_received_at ON "emails"(received_at DESC);
 CREATE INDEX idx_emails_thread_time ON "emails"(gmail_thread_id, received_at);
+
+CREATE TABLE "attachments" (
+  id                  UUID             PRIMARY KEY DEFAULT uuid_generate_v4(),
+  owner_type          attachment_owner NOT NULL,
+  owner_id            UUID             NOT NULL,
+  file_name           TEXT             NOT NULL,
+  mime_type           VARCHAR(127),
+  size_bytes          BIGINT,                              -- nullable: chưa biết khi metadata-only
+  storage_path        TEXT,                                -- nullable: chưa download / download fail
+  source_url          TEXT,                                -- URL gốc trên HUST (chỉ NEWS)
+  gmail_attachment_id TEXT,                                -- Gmail attachmentId (chỉ EMAIL)
+  is_inline           BOOLEAN          DEFAULT FALSE,
+  created_at          TIMESTAMPTZ      DEFAULT CURRENT_TIMESTAMP,
+  mod_time            TIMESTAMPTZ      DEFAULT CURRENT_TIMESTAMP,
+  is_deleted          BOOLEAN          DEFAULT FALSE,
+
+  -- Cùng owner KHÔNG được trùng tên file (idempotent re-scrape).
+  CONSTRAINT uq_attachments_owner_filename UNIQUE (owner_type, owner_id, file_name)
+);
+
+CREATE INDEX idx_attachments_owner   ON "attachments"(owner_type, owner_id);
+CREATE INDEX idx_attachments_modtime ON "attachments"(mod_time);
+
+-- Cascade soft-delete: khi 1 email/news bị soft-delete → attachments của nó
+-- cũng soft-delete theo. Không xoá file đĩa (cleanup job riêng).
+CREATE OR REPLACE FUNCTION fn_cascade_delete_attachments() RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_TABLE_NAME = 'emails' THEN
+    UPDATE attachments
+       SET is_deleted = TRUE, mod_time = CURRENT_TIMESTAMP
+     WHERE owner_type = 'EMAIL' AND owner_id = NEW.id AND NEW.is_deleted = TRUE;
+  ELSIF TG_TABLE_NAME = 'news' THEN
+    UPDATE attachments
+       SET is_deleted = TRUE, mod_time = CURRENT_TIMESTAMP
+     WHERE owner_type = 'NEWS' AND owner_id = NEW.id AND NEW.is_deleted = TRUE;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_emails_soft_delete_attachments
+AFTER UPDATE OF is_deleted ON emails
+FOR EACH ROW WHEN (NEW.is_deleted = TRUE AND OLD.is_deleted = FALSE)
+EXECUTE FUNCTION fn_cascade_delete_attachments();
+
+CREATE TRIGGER trg_news_soft_delete_attachments
+AFTER UPDATE OF is_deleted ON news
+FOR EACH ROW WHEN (NEW.is_deleted = TRUE AND OLD.is_deleted = FALSE)
+EXECUTE FUNCTION fn_cascade_delete_attachments();
 
 -- ═════════════════════════════════════════════════════════════ TASKS & TAGS
 CREATE TABLE "tasks" (

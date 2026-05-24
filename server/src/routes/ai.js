@@ -1,13 +1,3 @@
-/**
- * src/routes/ai.js
- *
- * THAY ĐỔI 2025-05-04 (v2):
- *   - Trước khi gọi chat(), fetch list tag của user → đưa vào
- *     buildToolSystemNote({ tags }) để model biết tag nào tồn tại.
- *   - Response trả `tool_calls` để client (Kotlin) hiển thị từng bước
- *     AI đã làm trong chat UI.
- */
-
 import express from 'express';
 
 import { requireAuth } from '../middleware/authMiddleware.js';
@@ -17,6 +7,7 @@ import {
   TASK_TOOL_DECLARATIONS,
   makeTaskToolExecutor,
   buildToolSystemNote,
+  buildUserInfoSystemNote,                                       // ← MỚI
 } from '../services/aiTools.js';
 
 const router = express.Router();
@@ -37,15 +28,57 @@ const fetchUserTags = async (userId) => {
 };
 
 /**
- * Ghép system instruction của caller với tool note.
- * Tool note (gồm tag list) đặt TRƯỚC để model thấy tool spec ngay đầu.
+ * Fetch email + user_info trong 1 query (LEFT JOIN vì user_info có
+ * thể chưa được tạo). Trả về { userEmail, userInfo } — userInfo = null
+ * nếu chưa có row trong user_info hoặc mọi field đều null/blank.
  */
-const composeSystemInstruction = (callerInstruction, tags) => {
+const fetchUserProfile = async (userId) => {
+  const r = await query(
+    `SELECT u.email,
+            ui.student_id, ui.full_name, ui.school,
+            ui.major, ui.class_name, ui.course
+     FROM users u
+     LEFT JOIN user_info ui ON ui.user_id = u.id
+     WHERE u.id = $1`,
+    [userId],
+  );
+  const row = r.rows[0];
+  if (!row) return { userEmail: null, userInfo: null };
+
+  const hasProfile = Boolean(
+    row.student_id || row.full_name || row.school ||
+    row.major || row.class_name || row.course,
+  );
+
+  return {
+    userEmail: row.email ?? null,
+    userInfo: hasProfile ? {
+      student_id: row.student_id,
+      full_name:  row.full_name,
+      school:     row.school,
+      major:      row.major,
+      class_name: row.class_name,
+      course:     row.course,
+    } : null,
+  };
+};
+
+/**
+ * Ghép system instruction theo thứ tự:
+ *   [user profile note] → [tool note + tags] → [caller-specific instruction]
+ *
+ * User profile đặt ĐẦU để model thiết lập "đang nói chuyện với ai" trước.
+ * Tool note ở giữa (bao gồm danh sách tag + ngày hôm nay). Caller
+ * instruction (email thread / news content / standalone) ở cuối — context
+ * cụ thể của phiên chat.
+ */
+const composeSystemInstruction = (callerInstruction, tags, profile) => {
+  const userNote = buildUserInfoSystemNote(profile);
   const toolNote = buildToolSystemNote({ tags });
   const base =
     callerInstruction?.trim() ||
     'Bạn là trợ lý cá nhân, trả lời ngắn gọn và lịch sự bằng tiếng Việt.';
-  return `${toolNote}\n\n${base}`;
+  return [userNote, toolNote, base].join('\n\n');
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -58,11 +91,15 @@ router.post('/chat', async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'messages là bắt buộc.' });
     }
 
-    const tags = await fetchUserTags(req.user.id);
+    // Fetch song song để giảm latency.
+    const [tags, profile] = await Promise.all([
+      fetchUserTags(req.user.id),
+      fetchUserProfile(req.user.id),
+    ]);
 
     const result = await chat({
       messages,
-      systemInstruction: composeSystemInstruction(system_instruction, tags),
+      systemInstruction: composeSystemInstruction(system_instruction, tags, profile),
       tools:             TASK_TOOL_DECLARATIONS,
       toolExecutor:      makeTaskToolExecutor({ userId: req.user.id }),
     });
@@ -144,10 +181,13 @@ router.post('/email-chat', async (req, res, next) => {
       })),
     };
 
-    // Fetch tag song song với việc đã có thread
-    const tags         = await fetchUserTags(req.user.id);
+    // Fetch tag + profile song song (sau khi đã có thread).
+    const [tags, profile] = await Promise.all([
+      fetchUserTags(req.user.id),
+      fetchUserProfile(req.user.id),
+    ]);
     const emailSysInstr = buildEmailSystemInstruction(thread);
-    const fullSysInstr  = composeSystemInstruction(emailSysInstr, tags);
+    const fullSysInstr  = composeSystemInstruction(emailSysInstr, tags, profile);
 
     const result = await chat({
       messages,

@@ -1,15 +1,3 @@
-/**
- * src/services/newsScrapeScheduler.js
- *
- * Tick định kỳ cào tin. Đặt riêng khỏi newsScrapeService.js để dễ:
- *   • Stub trong test (chỉ start scheduler khi NODE_ENV=production)
- *   • Tắt qua env var nếu deploy nhiều instance (chỉ 1 instance nên cào)
- *
- * Sử dụng setInterval thay vì node-cron để khỏi thêm dependency:
- *   - Đủ cho yêu cầu "mỗi N giờ chạy 1 lần".
- *   - Nếu sau này cần biểu thức cron phức tạp → thay bằng node-cron.
- */
-
 import { syncNews } from './newsScrapeService.js';
 
 // ENV overrides (mặc định: 1 giờ/lần, không cào lại bài đã có content)

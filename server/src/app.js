@@ -12,9 +12,10 @@ import syncRoutes             from './routes/sync.js';
 import userInfoRoutes         from './routes/userInfo.js';
 import emailRoutes            from './routes/emails.js';
 import aiRoutes               from './routes/ai.js';
-import newsRoutes             from './routes/news.js';                       // ← MỚI
+import newsRoutes             from './routes/news.js';
+import attachmentRoutes       from './routes/attachments.js';                  // ← MỚI
 import { startPolling }       from './services/emailSyncService.js';
-import { startNewsScheduler } from './services/newsScrapeScheduler.js';      // ← MỚI
+import { startNewsScheduler } from './services/newsScrapeScheduler.js';
 
 const app  = express();
 const PORT = Number.parseInt(process.env.PORT, 10) || 3000;
@@ -38,15 +39,16 @@ app.use(session({
 app.use(passport.initialize());
 app.use(passport.session());
 
-app.use('/api/auth',      authRoutes);
-app.use('/api/accounts',  accountRoutes);
-app.use('/api/tasks',     taskRoutes);
-app.use('/api/tags',      tagRoutes);
-app.use('/api/sync',      syncRoutes);
-app.use('/api/user-info', userInfoRoutes);
-app.use('/api/emails',    emailRoutes);
-app.use('/api/ai',        aiRoutes);
-app.use('/api/news',      newsRoutes);                                       // ← MỚI
+app.use('/api/auth',        authRoutes);
+app.use('/api/accounts',    accountRoutes);
+app.use('/api/tasks',       taskRoutes);
+app.use('/api/tags',        tagRoutes);
+app.use('/api/sync',        syncRoutes);
+app.use('/api/user-info',   userInfoRoutes);
+app.use('/api/emails',      emailRoutes);
+app.use('/api/ai',          aiRoutes);
+app.use('/api/news',        newsRoutes);
+app.use('/api/attachments', attachmentRoutes);                                 // ← MỚI
 
 app.get('/api/health', (_req, res) => {
   res.json({
@@ -77,7 +79,6 @@ app.listen(PORT, () => {
     startPolling(intervalMs);
   }
 
-  // Cào tin HUST CTT định kỳ. Tắt qua NEWS_SCRAPE_ENABLED=false nếu cần.   ← MỚI
   startNewsScheduler();
 });
 
