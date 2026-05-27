@@ -4,6 +4,7 @@ import { requireAuth } from '../middleware/authMiddleware.js';
 import { query }       from '../config/db.js';
 import { syncNews }    from '../services/newsScrapeService.js';
 import * as att        from '../services/attachmentService.js';
+import * as rec        from '../services/newsRecommendationService.js';   // ← MỚI
 
 const router = express.Router();
 router.use(requireAuth);
@@ -84,6 +85,55 @@ router.get('/', async (req, res, next) => {
         has_next:   safePage < totalPage,
       },
     });
+  } catch (err) { next(err); }
+});
+
+// ═════════════════════════════════════════════════════════════
+// RECOMMENDATIONS — phải đặt TRƯỚC `router.get('/:id', ...)` để
+// Express không match "recommendations" như là id rồi 404.
+// ═════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────────
+// GET /api/news/recommendations
+// Trả danh sách news đã đề xuất cho user (cache 6h).
+// Query: ?limit=20 (default 50, max 100)
+// ─────────────────────────────────────────────────────────
+router.get('/recommendations', async (req, res, next) => {
+  try {
+    const limit      = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 50));
+    const recomputed = await rec.ensureFresh(req.user.id);
+    const rows       = await rec.getForUser(req.user.id, { limit });
+
+    await attachAttachments(rows);
+
+    res.json({
+      success: true,
+      data:    rows,
+      meta:    { total: rows.length, recomputed },
+    });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────
+// POST /api/news/recommendations/refresh
+// Force recompute (vd: user vừa update profile, hoặc bấm refresh).
+// ─────────────────────────────────────────────────────────
+router.post('/recommendations/refresh', async (req, res, next) => {
+  try {
+    const result = await rec.refreshForUser(req.user.id);
+    res.json({ success: true, ...result });
+  } catch (err) { next(err); }
+});
+
+// ─────────────────────────────────────────────────────────
+// POST /api/news/recommendations/:id/dismiss
+// User ẩn 1 đề xuất (không xuất hiện lại trong list).
+// ─────────────────────────────────────────────────────────
+router.post('/recommendations/:id/dismiss', async (req, res, next) => {
+  try {
+    const ok = await rec.dismissForUser(req.user.id, req.params.id);
+    if (!ok) return res.status(404).json({ success: false, message: 'Không tìm thấy đề xuất.' });
+    res.json({ success: true });
   } catch (err) { next(err); }
 });
 

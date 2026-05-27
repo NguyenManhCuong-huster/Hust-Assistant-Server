@@ -4,7 +4,7 @@ CREATE TYPE provider_type    AS ENUM ('GMAIL', 'OUTLOOK', 'CTT');
 CREATE TYPE task_category    AS ENUM ('TODO', 'CLASS', 'EXAM');
 CREATE TYPE source_origin    AS ENUM ('MANUAL', 'EMAIL', 'NEWS', 'CTT');
 CREATE TYPE account_status   AS ENUM ('ACTIVE', 'EXPIRED', 'REVOKED');
-CREATE TYPE attachment_owner AS ENUM ('NEWS', 'EMAIL');                 -- MỚI
+CREATE TYPE attachment_owner AS ENUM ('NEWS', 'EMAIL');
 
 -- ═════════════════════════════════════════════════════════════ USERS
 CREATE TABLE "users" (
@@ -89,6 +89,22 @@ VALUES (
 )
 ON CONFLICT (name) DO NOTHING;
 
+-- ═════════════════════════════════════════════════════════════ NEWS RECOMMENDATIONS
+-- Cache kết quả đề xuất news cho từng user, recompute lazy (TTL 6h).
+-- Invalidate (xoá rows) khi user update user_info → next request sẽ recompute.
+CREATE TABLE "news_recommendations" (
+  user_id          UUID         NOT NULL REFERENCES "users"(id) ON DELETE CASCADE,
+  news_id          UUID         NOT NULL REFERENCES "news"(id)  ON DELETE CASCADE,
+  score            REAL         NOT NULL,
+  reason           TEXT,                                  -- "Khớp: K66, Công nghệ thông tin"
+  matched_keywords TEXT[]       NOT NULL DEFAULT '{}',    -- ['K66','CNTT']
+  generated_at     TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  is_dismissed     BOOLEAN      NOT NULL DEFAULT FALSE,
+  PRIMARY KEY (user_id, news_id)
+);
+CREATE INDEX idx_news_rec_user_score ON "news_recommendations"(user_id, score DESC);
+CREATE INDEX idx_news_rec_user_genat ON "news_recommendations"(user_id, generated_at DESC);
+
 -- ═════════════════════════════════════════════════════════════ EMAILS
 CREATE TABLE "emails" (
   id               UUID         PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -118,16 +134,15 @@ CREATE TABLE "attachments" (
   owner_id            UUID             NOT NULL,
   file_name           TEXT             NOT NULL,
   mime_type           VARCHAR(127),
-  size_bytes          BIGINT,                              -- nullable: chưa biết khi metadata-only
-  storage_path        TEXT,                                -- nullable: chưa download / download fail
-  source_url          TEXT,                                -- URL gốc trên HUST (chỉ NEWS)
-  gmail_attachment_id TEXT,                                -- Gmail attachmentId (chỉ EMAIL)
+  size_bytes          BIGINT,
+  storage_path        TEXT,
+  source_url          TEXT,
+  gmail_attachment_id TEXT,
   is_inline           BOOLEAN          DEFAULT FALSE,
   created_at          TIMESTAMPTZ      DEFAULT CURRENT_TIMESTAMP,
   mod_time            TIMESTAMPTZ      DEFAULT CURRENT_TIMESTAMP,
   is_deleted          BOOLEAN          DEFAULT FALSE,
 
-  -- Cùng owner KHÔNG được trùng tên file (idempotent re-scrape).
   CONSTRAINT uq_attachments_owner_filename UNIQUE (owner_type, owner_id, file_name)
 );
 

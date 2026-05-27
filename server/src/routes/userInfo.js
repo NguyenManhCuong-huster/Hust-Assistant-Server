@@ -1,6 +1,7 @@
 import express from 'express';
 import { requireAuth } from '../middleware/authMiddleware.js';
 import { query } from '../config/db.js';
+import * as rec from '../services/newsRecommendationService.js';   // ← MỚI
 
 const router = express.Router();
 router.use(requireAuth);
@@ -53,6 +54,16 @@ const validate = (data, { partial = false } = {}) => {
   return null;
 };
 
+/**
+ * Invalidate news_recommendations cache khi user vừa đổi profile.
+ * Fire-and-forget (.catch để không block response).
+ */
+const invalidateRecommendations = (userId) => {
+  rec.invalidateForUser(userId).catch((e) =>
+    console.error('[NewsRec] invalidate fail:', e.message),
+  );
+};
+
 // GET /api/user-info
 router.get('/', async (req, res, next) => {
   try {
@@ -74,6 +85,7 @@ router.post('/', async (req, res, next) => {
       [req.user.id, data.student_id, data.full_name ?? null, data.date_of_birth ?? null,
        data.phone ?? null, data.school ?? null, data.major ?? null, data.class_name ?? null, data.course ?? null],
     );
+    invalidateRecommendations(req.user.id);   // ← MỚI
     res.status(201).json({ success: true, data: r.rows[0] });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ success: false, message: 'A student profile already exists. Use PUT or PATCH to update it.' });
@@ -98,6 +110,7 @@ router.put('/', async (req, res, next) => {
       [req.user.id, data.student_id, data.full_name ?? null, data.date_of_birth ?? null,
        data.phone ?? null, data.school ?? null, data.major ?? null, data.class_name ?? null, data.course ?? null],
     );
+    invalidateRecommendations(req.user.id);   // ← MỚI
     res.json({ success: true, data: r.rows[0] });
   } catch (err) { next(err); }
 });
@@ -118,6 +131,7 @@ router.patch('/', async (req, res, next) => {
       `UPDATE user_info SET ${setClauses.join(',')} WHERE user_id=$${keys.length + 1} RETURNING ${RETURN_COLUMNS}`,
       [...keys.map((k) => data[k]), req.user.id],
     );
+    invalidateRecommendations(req.user.id);   // ← MỚI
     res.json({ success: true, data: r.rows[0] });
   } catch (err) { next(err); }
 });
@@ -127,6 +141,7 @@ router.delete('/', async (req, res, next) => {
   try {
     const r = await query('DELETE FROM user_info WHERE user_id=$1 RETURNING user_id', [req.user.id]);
     if (!r.rows[0]) return res.status(404).json({ success: false, message: 'No student profile found to delete.' });
+    invalidateRecommendations(req.user.id);   // ← MỚI (xoá profile cũng cần invalidate)
     res.json({ success: true, message: 'Student profile deleted.' });
   } catch (err) { next(err); }
 });

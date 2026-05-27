@@ -12,7 +12,8 @@ const createTaskDeclaration = {
     'Nếu user nói thời gian dạng tương đối ("ngày mai 9h", "thứ 6 tuần sau"), ' +
     'hãy convert thành ISO 8601 với timezone +07:00 dựa trên thời điểm hiện tại. ' +
     'Nếu thiếu thông tin về thời gian thì cứ bỏ qua start_time/end_time, không tự bịa. ' +
-    'Với TKB lặp theo tuần (nhiều buổi cùng môn), KHÔNG dùng tool này — dùng `create_weekly_tasks` 1 lần cho cả môn.',
+    'Với task LẶP HẰNG TUẦN (TKB, gym mỗi T3, uống thuốc mỗi sáng...), ' +
+    'KHÔNG dùng tool này — dùng `create_weekly_tasks`.',
   parameters: {
     type: 'object',
     properties: {
@@ -60,68 +61,83 @@ const createTaskDeclaration = {
 const createWeeklyTasksDeclaration = {
   name: 'create_weekly_tasks',
   description:
-    'Tạo nhiều task lặp lại theo tuần cho 1 lớp học trong Thời Khoá Biểu (TKB). ' +
-    'Mỗi tuần trong `weeks` sinh ra 1 task riêng (vd weeks=[25,26,...,32] → 8 task). ' +
-    'AI nên gọi tool này 1 lần cho MỖI LỚP trong TKB (gọi parallel nhiều lần cùng turn nếu user paste TKB cả kỳ). ' +
+    'Tạo nhiều task LẶP HẰNG TUẦN trong một khoảng thời gian. ' +
+    'Mỗi ngày trong [loop_start_date .. loop_end_date] (inclusive) rơi vào `day_of_week` ' +
+    'sẽ sinh ra 1 task riêng. ' +
+    'Dùng cho mọi loại task lặp tuần: lịch học (TKB), lịch thi định kỳ, đi gym, uống thuốc, ' +
+    'họp định kỳ, học nhóm hằng tuần, đi chợ cuối tuần, v.v.' +
     '\n\n' +
-    'YÊU CẦU BẮT BUỘC về `week_1_start_date`: ' +
-    'Đây là ngày Thứ Hai của Tuần 1 trong kỳ học hiện tại. ' +
-    'CTT HUST đánh số tuần liên tục qua các kỳ (vd kỳ 20242 có thể bắt đầu từ tuần 25), ' +
-    'nên không có cách nào đoán đúng nếu user không nói. ' +
-    'NẾU user chưa cung cấp thông tin này (qua câu hỏi trước hoặc trong TKB họ paste), ' +
-    'KHÔNG được gọi tool này — phải hỏi user trước, ví dụ: ' +
-    '"Để chuyển số tuần (vd tuần 25-32) thành ngày thực, mình cần biết Tuần 1 của kỳ bắt đầu vào ngày Thứ Hai nào. ' +
-    'Bạn xem giúp trên CTT mục \'Lịch học, lịch thi theo tuần\' và cho mình biết được không?" ' +
-    'TUYỆT ĐỐI KHÔNG tự đoán mốc tuần 1.',
+    'AI PHẢI tự tính `loop_start_date` và `loop_end_date` thành ngày cụ thể (YYYY-MM-DD) ' +
+    'trước khi gọi tool — server KHÔNG hiểu mô tả tương đối. ' +
+    'Dùng ngày hôm nay (đã có ở system note) làm mốc. ' +
+    'Ví dụ: "gym mỗi Thứ 3 trong 1 tháng tới" → loop_start_date = hôm nay, loop_end_date = hôm nay + 30 ngày. ' +
+    'Ví dụ TKB HUST: user paste "Thứ 4, tuần 25-32" + nói "Tuần 1 bắt đầu 02/09/2024" → ' +
+    'AI tự tính loop_start_date = 02/09/2024 + 24*7 = 2025-02-17, ' +
+    'loop_end_date = loop_start_date + (32-25)*7 + 6 = 2025-04-13.' +
+    '\n\n' +
+    'GỌI NHIỀU LẦN khi:' +
+    '\n' +
+    '  - Nhiều khoảng không liên tục (vd TKB "tuần 25-32, 34-42" — bỏ tuần 33 thi giữa kỳ): ' +
+    'gọi 2 lần, mỗi khoảng 1 lần.' +
+    '\n' +
+    '  - Nhiều thứ khác nhau (vd "gym mỗi T3 và T5"): gọi 2 lần với day_of_week khác nhau.' +
+    '\n' +
+    '  - Nhiều lớp khác nhau trong cùng TKB: gọi N lần (parallel cùng turn được).',
   parameters: {
     type: 'object',
     properties: {
       title: {
         type:        'string',
         description:
-          'Tên môn + loại lớp. Vd: "Tối ưu lập kế hoạch (LT+BT)", "Đồ án tốt nghiệp". ' +
-          'KHÔNG nhét tuần / thứ vào title — đã có ở field khác.',
+          'Tiêu đề ngắn gọn (≤ 120 ký tự). ' +
+          'Vd: "Tối ưu lập kế hoạch (LT+BT)", "Đi gym buổi sáng", "Họp dự án X", "Uống thuốc huyết áp".',
       },
       description: {
         type:        'string',
         description:
-          'Mô tả gộp các info phụ: phòng, giảng viên, mã lớp, nhóm, link online, hình thức. ' +
-          'Format thoải mái, vd: "Phòng D9-303 • GV: Dương Quang Huy • Mã lớp: 168498 • Nhóm: TC".',
+          'Mô tả chi tiết (optional). Vd với TKB: "Phòng D9-303 • GV: Dương Quang Huy • Mã lớp: 168498". ' +
+          'Vd với gym: "Tập chân + lưng theo lịch coach".',
       },
       day_of_week: {
         type:        'integer',
         description:
-          'Thứ trong tuần theo convention CTT HUST: 2=Thứ 2, 3=Thứ 3, ..., 7=Thứ 7, 8=Chủ Nhật. ' +
-          'Vd "Thứ 4,14h10-17h30" → day_of_week=4.',
+          'Thứ trong tuần theo ISO 8601: 1=Thứ 2 (Mon), 2=Thứ 3, 3=Thứ 4, 4=Thứ 5, ' +
+          '5=Thứ 6, 6=Thứ 7, 7=Chủ Nhật (Sun). ' +
+          'CHỈ 1 thứ duy nhất mỗi lần gọi. Nếu user nói "T3 và T5" thì gọi tool 2 lần.',
       },
       start_time_of_day: {
         type:        'string',
-        description: 'Giờ bắt đầu buổi học trong ngày, format "HH:mm" (24h, giờ VN +07:00). Vd "14:10".',
+        description:
+          'Giờ bắt đầu mỗi buổi, format "HH:mm" (24h, giờ VN +07:00). Vd "14:10". ' +
+          'OPTIONAL — bỏ qua nếu task không có giờ cụ thể (vd "uống thuốc mỗi T3"). ' +
+          'Nếu cung cấp `start_time_of_day` thì BẮT BUỘC cung cấp `end_time_of_day`.',
       },
       end_time_of_day: {
         type:        'string',
-        description: 'Giờ kết thúc buổi học, format "HH:mm". Vd "17:30".',
-      },
-      weeks: {
-        type:  'array',
-        items: { type: 'integer' },
         description:
-          'Danh sách số tuần học (theo cách CTT đánh số). ' +
-          'PHẢI expand range, KHÔNG được dùng chuỗi "25-32". ' +
-          'Vd "25-32,34-42" → [25,26,27,28,29,30,31,32,34,35,36,37,38,39,40,41,42] (bỏ tuần 33 thi giữa kỳ).',
+          'Giờ kết thúc mỗi buổi, format "HH:mm". OPTIONAL (theo cặp với start_time_of_day).',
       },
-      week_1_start_date: {
+      loop_start_date: {
         type:        'string',
         description:
-          'Ngày Thứ Hai của Tuần 1 trong kỳ, format ISO date "YYYY-MM-DD" (giờ VN). ' +
-          'Vd nếu user nói "Tuần 25 từ 17/02/2025 đến 23/02/2025" thì Tuần 1 = 17/02/2025 - 7*24 = ' +
-          'cần lùi (25-1)=24 tuần để ra Tuần 1, kết quả "2024-09-02". ' +
-          'TUYỆT ĐỐI không tự bịa — phải hỏi user nếu chưa biết.',
+          'Ngày bắt đầu lặp (inclusive), format "YYYY-MM-DD" (giờ VN). ' +
+          'Task đầu tiên là ngày `day_of_week` đầu tiên >= loop_start_date. ' +
+          'Vd loop_start_date="2025-02-17" (T2), day_of_week=4 (Thứ 5) → task đầu = 2025-02-20.',
+      },
+      loop_end_date: {
+        type:        'string',
+        description:
+          'Ngày kết thúc lặp (inclusive), format "YYYY-MM-DD". ' +
+          'Task cuối là ngày `day_of_week` cuối cùng <= loop_end_date.',
       },
       task_type: {
         type:        'string',
-        enum:        ['CLASS', 'EXAM'],
-        description: 'CLASS cho lịch học bình thường, EXAM cho lịch thi. Mặc định CLASS.',
+        enum:        ['TODO', 'CLASS', 'EXAM'],
+        description:
+          'TODO = việc cần làm lặp lại (gym, uống thuốc, đi chợ, họp định kỳ...). ' +
+          'CLASS = lịch học/buổi học định kỳ (TKB). ' +
+          'EXAM = lịch thi (hiếm khi lặp tuần, nhưng có thể). ' +
+          'Mặc định TODO nếu không rõ.',
       },
       tag_ids: {
         type:  'array',
@@ -132,8 +148,7 @@ const createWeeklyTasksDeclaration = {
       },
     },
     required: [
-      'title', 'day_of_week', 'start_time_of_day', 'end_time_of_day',
-      'weeks', 'week_1_start_date',
+      'title', 'day_of_week', 'loop_start_date', 'loop_end_date',
     ],
   },
 };
@@ -153,20 +168,25 @@ export const TASK_TOOL_DECLARATIONS = [
 export const buildToolSystemNote = ({ tags = [] } = {}) => {
   const lines = [
     'Bạn có các tool sau để thao tác task cho user:',
-    '  - `create_task`: tạo 1 task đơn lẻ (việc cần làm / lịch học 1 buổi / lịch thi).',
-    '  - `create_weekly_tasks`: tạo nhiều task lặp tuần cho 1 lớp trong TKB.',
+    '  - `create_task`: tạo 1 task đơn lẻ.',
+    '  - `create_weekly_tasks`: tạo nhiều task LẶP HẰNG TUẦN trong 1 khoảng thời gian.',
     `Hôm nay là ${new Date().toISOString()} (UTC). Múi giờ user: +07:00 (giờ VN).`,
     '',
-    'Khi user yêu cầu "tạo task", "thêm việc", "nhắc tôi"... → `create_task`.',
-    'Khi user paste TKB hoặc nói "tạo task từ TKB", "import lịch học cả kỳ"... → `create_weekly_tasks`,',
-    'gọi 1 lần cho MỖI LỚP (parallel nhiều lần cùng turn được).',
+    'Khi user yêu cầu "tạo task", "thêm việc", "nhắc tôi"... cho 1 sự kiện đơn → `create_task`.',
+    'Khi user yêu cầu task LẶP HẰNG TUẦN (TKB, gym mỗi T3, uống thuốc mỗi sáng,',
+    'họp định kỳ thứ 6, v.v.) → `create_weekly_tasks`. Mỗi (thứ × khoảng) gọi 1 lần.',
+    'KHÔNG dùng `create_task` rồi loop tay nhiều lần — tốn token và sai design.',
     '',
     'QUAN TRỌNG về `create_weekly_tasks`:',
-    '  - Param `week_1_start_date` (Thứ 2 của Tuần 1 trong kỳ) BẮT BUỘC user cung cấp.',
-    '  - Nếu user paste TKB nhưng KHÔNG nói tuần 1 bắt đầu hôm nào → HỎI user trước,',
-    '    giải thích "mình cần biết để chuyển số tuần (vd 25-32) thành ngày thực".',
-    '  - TUYỆT ĐỐI không tự đoán mốc tuần 1 dù có biết kỳ hiện tại.',
-    '  - Tuần học dạng "25-32,34-42" phải EXPAND thành array số nguyên đầy đủ, không pass nguyên chuỗi.',
+    '  - Server chỉ nhận NGÀY CỤ THỂ: `loop_start_date` và `loop_end_date` (YYYY-MM-DD).',
+    '  - AI tự convert mô tả thời gian thành ngày trước khi gọi tool.',
+    '    Vd "trong 1 tháng tới" → loop_start = hôm nay, loop_end = hôm nay + 30 ngày.',
+    '    Vd "đến hết tháng 6" → AI tự tính ra loop_end = ngày cuối tháng 6.',
+    '  - Convention `day_of_week`: ISO 8601 (1=Thứ 2 ... 7=Chủ Nhật). KHÔNG nhầm với CTT HUST (2..8).',
+    '  - Trường hợp TKB HUST (user paste "tuần 25-32"): AI cần biết Tuần 1 của kỳ bắt đầu hôm nào',
+    '    để convert ra ngày thực. Nếu user CHƯA cho biết → HỎI trước, TUYỆT ĐỐI không tự đoán.',
+    '  - Khoảng không liên tục ("tuần 25-32, 34-42") → gọi tool NHIỀU LẦN, mỗi khoảng 1 lần.',
+    '  - Nhiều thứ trong tuần ("gym T3 và T5") → gọi NHIỀU LẦN, mỗi thứ 1 lần.',
     '',
     'Sau khi tool chạy xong, trả lời user bằng tiếng Việt, ngắn gọn, xác nhận đã tạo (hoặc báo lỗi).',
     'Tuyệt đối KHÔNG nói "tôi đã tạo task" nếu chưa thực sự gọi tool.',
@@ -190,30 +210,17 @@ export const buildToolSystemNote = ({ tags = [] } = {}) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// User profile system note   (MỚI 2026-05-24)
+// User profile system note
 // ─────────────────────────────────────────────────────────────
 /**
  * buildUserInfoSystemNote — sinh đoạn note mô tả user đang chat.
- *
  * Được prepend vào systemInstruction (KHÔNG nằm trong messages) nên
- * KHÔNG bao giờ hiện ở chat UI. Model thấy → có ngữ cảnh để:
- *   - Xưng hô đúng tên user.
- *   - Suy luận năm học từ "course" (vd K66 → khoá 2021 → đang năm cuối).
- *   - Gợi ý task phù hợp với chuyên ngành / trường-viện.
- *
- * QUYẾT ĐỊNH THIẾT KẾ:
- *   - CHỈ đưa field "không nhạy cảm" cho model: email, tên, MSSV, trường,
- *     ngành, lớp, khoá.
- *   - KHÔNG đưa phone, date_of_birth — không cần cho gợi ý task, tránh
- *     model vô tình lặp lại làm leak thông tin.
- *   - Bỏ field null/blank để note gọn, tiết kiệm token.
- *   - Dặn model KHÔNG lặp lại thông tin trong reply trừ khi user hỏi —
- *     tránh "Xin chào Nguyễn Văn A, MSSV 20226XXX..." ở mọi reply.
+ * KHÔNG bao giờ hiện ở chat UI.
  *
  * @param {Object}  opts
  * @param {Object=} opts.userInfo   — row từ bảng user_info, có thể null
- * @param {string=} opts.userEmail  — email từ bảng users (luôn có nếu logged-in)
- * @returns {string}  — chuỗi đã format (luôn non-empty, có fallback)
+ * @param {string=} opts.userEmail  — email từ bảng users
+ * @returns {string}
  */
 export const buildUserInfoSystemNote = ({ userInfo = null, userEmail = null } = {}) => {
   const lines = [];
@@ -227,8 +234,6 @@ export const buildUserInfoSystemNote = ({ userInfo = null, userEmail = null } = 
   if (userInfo?.course)     lines.push(`  - Khoá: ${userInfo.course}`);
 
   if (lines.length === 0) {
-    // User chưa đăng nhập hoặc chưa khai báo profile — báo model biết để
-    // không cố cá nhân hoá khi chưa có dữ kiện.
     return 'Thông tin user đang chat: (chưa khai báo profile).';
   }
 
@@ -237,7 +242,7 @@ export const buildUserInfoSystemNote = ({ userInfo = null, userEmail = null } = 
     'trong reply trừ khi user hỏi trực tiếp về profile của họ):',
     ...lines,
     'Ưu tiên xưng hô theo tên ngắn khi phù hợp.',
-    'Tận dụng khoá học và ngành để gợi ý task chính xác hơn.',
+    'Tận dụng khoá học (vd K66 → năm 4, K68 → năm 2) và ngành để gợi ý task chính xác hơn.',
   ].join('\n');
 };
 
@@ -263,13 +268,9 @@ export const makeTaskToolExecutor = ({
       return await execCreateTask({ args, userId, sourceType, sourceId });
     }
     if (toolName === 'create_weekly_tasks') {
-      // TKB-related → ép source_type = 'CTT' nếu caller chưa cho biết source riêng
-      const wkSourceType = sourceType === 'MANUAL' ? 'CTT' : sourceType;
-      return await execCreateWeeklyTasks({
-        args, userId,
-        sourceType: wkSourceType,
-        sourceId,
-      });
+      // KHÔNG còn auto-override source_type='CTT' nữa — tool đã tổng quát,
+      // không nhất thiết là TKB. Caller (route handler) quyết định source.
+      return await execCreateWeeklyTasks({ args, userId, sourceType, sourceId });
     }
     return { success: false, error: `Tool "${toolName}" không được hỗ trợ.` };
   };
@@ -292,32 +293,7 @@ const sanitizeTagIds = (raw) => {
   )];
 };
 
-/**
- * Tính ngày của buổi học từ (week_1_monday, week_num, day_of_week).
- *
- * @param {string} week1MondayIso  — "YYYY-MM-DD", Thứ Hai của Tuần 1
- * @param {number} weekNum         — số tuần (vd 25)
- * @param {number} dayOfWeek       — 2=T2 ... 7=T7, 8=CN (theo CTT HUST)
- * @returns {string|null}          — "YYYY-MM-DD" hoặc null nếu input lỗi
- */
-const computeSessionDate = (week1MondayIso, weekNum, dayOfWeek) => {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(week1MondayIso)) return null;
-  if (!Number.isInteger(weekNum) || weekNum < 1) return null;
-  if (!Number.isInteger(dayOfWeek) || dayOfWeek < 2 || dayOfWeek > 8) return null;
-
-  // Parse như local date (tránh timezone shift của new Date('YYYY-MM-DD'))
-  const [y, m, d] = week1MondayIso.split('-').map(Number);
-  const base = new Date(Date.UTC(y, m - 1, d));  // dùng UTC để cộng ngày sạch
-  const offsetDays = (weekNum - 1) * 7 + (dayOfWeek - 2);
-  base.setUTCDate(base.getUTCDate() + offsetDays);
-
-  const yy = base.getUTCFullYear();
-  const mm = String(base.getUTCMonth() + 1).padStart(2, '0');
-  const dd = String(base.getUTCDate()).padStart(2, '0');
-  return `${yy}-${mm}-${dd}`;
-};
-
-/** "14:10" → "14:10:00" hợp lệ; trả null nếu sai format. */
+/** "14:10" → "14:10:00"; trả null nếu sai format. */
 const normalizeTimeOfDay = (v) => {
   if (typeof v !== 'string') return null;
   const m = v.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
@@ -329,8 +305,37 @@ const normalizeTimeOfDay = (v) => {
   return `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 };
 
+/**
+ * "YYYY-MM-DD" → epoch ms tại 00:00 UTC của ngày đó.
+ * Trả null nếu format sai hoặc ngày không tồn tại (vd "2025-02-30").
+ */
+const parseDateIso = (iso) => {
+  if (typeof iso !== 'string') return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return null;
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (Number.isNaN(dt.getTime())) return null;
+  // Roundtrip check: bắt được "2025-02-30" → JS sẽ overflow thành 2025-03-02.
+  if (formatDateIso(dt) !== iso) return null;
+  return dt.getTime();
+};
+
+/** Date → "YYYY-MM-DD" (UTC parts). */
+const formatDateIso = (dt) => {
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(dt.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+};
+
+/** ISO 8601 weekday: 1=Mon ... 7=Sun. */
+const isoWeekday = (dt) => {
+  const j = dt.getUTCDay(); // 0=Sun..6=Sat
+  return j === 0 ? 7 : j;
+};
+
 // ─────────────────────────────────────────────────────────────
-// execCreateTask — không đổi logic, chỉ refactor dùng helper
+// execCreateTask — không đổi
 // ─────────────────────────────────────────────────────────────
 const execCreateTask = async ({ args, userId, sourceType, sourceId }) => {
   const title = (args?.title ?? '').toString().trim();
@@ -404,70 +409,107 @@ const execCreateTask = async ({ args, userId, sourceType, sourceId }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// execCreateWeeklyTasks — loop tạo nhiều task trong 1 transaction
+// execCreateWeeklyTasks — TỔNG QUÁT (v5)
+//
+// Iterate ngày trong [loop_start_date .. loop_end_date], chọn những
+// ngày rơi vào day_of_week, sinh 1 task/ngày trong 1 transaction.
 // ─────────────────────────────────────────────────────────────
 const execCreateWeeklyTasks = async ({ args, userId, sourceType, sourceId }) => {
-  // ---- Validate input ----
+  // ---- Validate title ----
   const title = (args?.title ?? '').toString().trim();
   if (!title) return { success: false, error: 'Thiếu title.' };
 
+  // ---- Validate day_of_week (ISO 1..7) ----
   const dayOfWeek = Number(args?.day_of_week);
-  if (!Number.isInteger(dayOfWeek) || dayOfWeek < 2 || dayOfWeek > 8) {
-    return { success: false, error: `day_of_week không hợp lệ (cần 2..8, nhận ${args?.day_of_week})` };
+  if (!Number.isInteger(dayOfWeek) || dayOfWeek < 1 || dayOfWeek > 7) {
+    return {
+      success: false,
+      error: `day_of_week không hợp lệ (cần 1..7 theo ISO 8601: 1=Thứ 2 ... 7=Chủ Nhật, ` +
+             `nhận: ${args?.day_of_week}).`,
+    };
   }
 
-  const startHm = normalizeTimeOfDay(args?.start_time_of_day);
-  const endHm   = normalizeTimeOfDay(args?.end_time_of_day);
-  if (!startHm) return { success: false, error: `start_time_of_day không hợp lệ: ${args?.start_time_of_day}` };
-  if (!endHm)   return { success: false, error: `end_time_of_day không hợp lệ: ${args?.end_time_of_day}` };
-
-  const weeksRaw = Array.isArray(args?.weeks) ? args.weeks : [];
-  const weeks = [...new Set(
-    weeksRaw.map((w) => Number(w)).filter((w) => Number.isInteger(w) && w >= 1 && w <= 53),
-  )].sort((a, b) => a - b);
-  if (weeks.length === 0) {
-    return { success: false, error: 'weeks rỗng hoặc không hợp lệ.' };
+  // ---- Validate loop range ----
+  const loopStart = String(args?.loop_start_date ?? '').trim();
+  const loopEnd   = String(args?.loop_end_date ?? '').trim();
+  const startMs   = parseDateIso(loopStart);
+  const endMs     = parseDateIso(loopEnd);
+  if (startMs === null) {
+    return { success: false, error: `loop_start_date phải dạng YYYY-MM-DD và là ngày hợp lệ (nhận: "${loopStart}").` };
+  }
+  if (endMs === null) {
+    return { success: false, error: `loop_end_date phải dạng YYYY-MM-DD và là ngày hợp lệ (nhận: "${loopEnd}").` };
+  }
+  if (startMs > endMs) {
+    return { success: false, error: `loop_start_date (${loopStart}) phải <= loop_end_date (${loopEnd}).` };
   }
 
-  const week1 = String(args?.week_1_start_date ?? '').trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(week1)) {
-    return { success: false, error: `week_1_start_date phải dạng YYYY-MM-DD (nhận: "${week1}").` };
+  // ---- Validate times of day (BOTH hoặc NEITHER) ----
+  const rawStart = args?.start_time_of_day;
+  const rawEnd   = args?.end_time_of_day;
+  const startHm  = rawStart ? normalizeTimeOfDay(rawStart) : null;
+  const endHm    = rawEnd   ? normalizeTimeOfDay(rawEnd)   : null;
+  if (rawStart && !startHm) return { success: false, error: `start_time_of_day không hợp lệ: "${rawStart}"` };
+  if (rawEnd && !endHm)     return { success: false, error: `end_time_of_day không hợp lệ: "${rawEnd}"` };
+  if (Boolean(startHm) !== Boolean(endHm)) {
+    return {
+      success: false,
+      error: 'Phải cung cấp CẢ start_time_of_day và end_time_of_day, hoặc bỏ qua cả hai.',
+    };
   }
+  const hasTime = Boolean(startHm && endHm);
 
-  const taskType = (args?.task_type ?? 'CLASS').toString().toUpperCase();
-  if (!['CLASS', 'EXAM'].includes(taskType)) {
-    return { success: false, error: `task_type không hợp lệ: ${taskType}` };
+  // ---- Validate task_type ----
+  const taskType = (args?.task_type ?? 'TODO').toString().toUpperCase();
+  if (!['TODO', 'CLASS', 'EXAM'].includes(taskType)) {
+    return { success: false, error: `task_type không hợp lệ: "${taskType}". Phải là TODO, CLASS, hoặc EXAM.` };
   }
 
   const description = args?.description ? String(args.description).trim() : null;
   const tagIds      = sanitizeTagIds(args?.tag_ids);
 
-  // ---- Build session list ----
-  const sessions = [];
-  const skipped  = [];
-  for (const w of weeks) {
-    const date = computeSessionDate(week1, w, dayOfWeek);
-    if (!date) { skipped.push({ week: w, reason: 'compute_date_failed' }); continue; }
-    // ISO 8601 với offset +07:00 (giờ VN)
-    sessions.push({
-      week:       w,
-      start_time: `${date}T${startHm}+07:00`,
-      end_time:   `${date}T${endHm}+07:00`,
-    });
-  }
-  if (sessions.length === 0) {
-    return { success: false, error: 'Không sinh được session hợp lệ từ weeks.' };
+  // ─────────────────────────────────────────────────
+  // Build session date list
+  // ─────────────────────────────────────────────────
+  // Tìm ngày đầu tiên >= loop_start_date mà rơi vào day_of_week.
+  // Sau đó cộng dồn 7 ngày cho đến khi vượt loop_end_date.
+  const startDt    = new Date(startMs);
+  const startDow   = isoWeekday(startDt);                 // 1..7
+  const advance    = (dayOfWeek - startDow + 7) % 7;      // 0..6 days to advance
+
+  const dates = [];
+  const cursor = new Date(startMs);
+  cursor.setUTCDate(cursor.getUTCDate() + advance);
+  while (cursor.getTime() <= endMs) {
+    dates.push(formatDateIso(cursor));
+    cursor.setUTCDate(cursor.getUTCDate() + 7);
   }
 
-  // ---- Insert batch trong 1 transaction ----
+  if (dates.length === 0) {
+    return {
+      success: false,
+      error: `Không có ngày nào trong khoảng ${loopStart} → ${loopEnd} rơi vào day_of_week=${dayOfWeek}.`,
+    };
+  }
+
+  // Build start_time / end_time ISO 8601 với offset +07:00 (giờ VN).
+  //   - Có time-of-day: dùng giờ AI cung cấp.
+  //   - Không có: start_time = null, end_time = ngày đó lúc 23:59 (deadline cuối ngày).
+  const sessions = dates.map((d) => ({
+    start_time: hasTime ? `${d}T${startHm}+07:00` : null,
+    end_time:   hasTime ? `${d}T${endHm}+07:00`   : `${d}T23:59:00+07:00`,
+  }));
+
+  // ─────────────────────────────────────────────────
+  // Insert batch trong 1 transaction
+  // ─────────────────────────────────────────────────
   const client = await getClient();
   try {
     await client.query('BEGIN');
 
-    // Bulk insert qua UNNEST (nhanh hơn loop INSERT cho 60-90 row)
     const titles       = sessions.map(() => title);
     const descriptions = sessions.map(() => description);
-    const startTimes   = sessions.map((s) => s.start_time);
+    const startTimes   = sessions.map((s) => s.start_time);   // text[] có thể chứa null
     const endTimes     = sessions.map((s) => s.end_time);
 
     const { rows: taskRows } = await client.query(
@@ -484,7 +526,7 @@ const execCreateWeeklyTasks = async ({ args, userId, sourceType, sourceId }) => 
       ],
     );
 
-    // Attach tags (giống execCreateTask, nhưng cho NHIỀU task)
+    // Attach tags: cross product mỗi task × mỗi valid tag
     let attachedTags = [];
     if (tagIds.length > 0 && taskRows.length > 0) {
       const valid = await client.query(
@@ -494,9 +536,8 @@ const execCreateWeeklyTasks = async ({ args, userId, sourceType, sourceId }) => 
         [tagIds, userId],
       );
       if (valid.rows.length > 0) {
-        const taskIds = taskRows.map((r) => r.id);
+        const taskIds   = taskRows.map((r) => r.id);
         const tagIdList = valid.rows.map((r) => r.id);
-        // Cross product: mỗi task × mỗi valid tag
         await client.query(
           `INSERT INTO task_tag_cross_ref (task_id, tag_id, is_deleted)
            SELECT t.task_id, g.tag_id, FALSE
@@ -512,8 +553,12 @@ const execCreateWeeklyTasks = async ({ args, userId, sourceType, sourceId }) => 
 
     await client.query('COMMIT');
 
-    // Sort task rows theo start_time để summary đẹp
-    taskRows.sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
+    // Sort task rows theo start_time (fallback end_time nếu start null)
+    taskRows.sort((a, b) => {
+      const ka = new Date(a.start_time ?? a.end_time).getTime();
+      const kb = new Date(b.start_time ?? b.end_time).getTime();
+      return ka - kb;
+    });
     const first = taskRows[0];
     const last  = taskRows[taskRows.length - 1];
 
@@ -521,14 +566,18 @@ const execCreateWeeklyTasks = async ({ args, userId, sourceType, sourceId }) => 
       success: true,
       summary: {
         title,
-        task_type:  taskType,
-        created:    taskRows.length,
-        skipped:    skipped.length,
+        task_type:        taskType,
+        created:          taskRows.length,
+        skipped:          0,                 // Logic mới không có gì để skip
+        day_of_week:      dayOfWeek,         // ISO 1..7
+        loop_start_date:  loopStart,
+        loop_end_date:    loopEnd,
+        // Có thể null khi không có time-of-day. Mapper client fall back về end_time.
         first_start_time: first?.start_time ?? null,
         last_start_time:  last?.start_time  ?? null,
-        weeks:      weeks,            // tuần đã xử lý (sau dedupe + sort)
-        day_of_week: dayOfWeek,
-        tags:       attachedTags,
+        first_end_time:   first?.end_time   ?? null,
+        last_end_time:    last?.end_time    ?? null,
+        tags:             attachedTags,
       },
       task_ids: taskRows.map((r) => r.id),
     };
