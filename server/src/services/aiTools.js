@@ -1,4 +1,5 @@
 import { getClient } from '../config/db.js';
+import { extractAttachmentTextByFileNameInIds } from './attachmentTextService.js';
 
 // ─────────────────────────────────────────────────────────────
 // Function declarations
@@ -121,8 +122,7 @@ const createWeeklyTasksDeclaration = {
         type:        'string',
         description:
           'Ngày bắt đầu lặp (inclusive), format "YYYY-MM-DD" (giờ VN). ' +
-          'Task đầu tiên là ngày `day_of_week` đầu tiên >= loop_start_date. ' +
-          'Vd loop_start_date="2025-02-17" (T2), day_of_week=4 (Thứ 5) → task đầu = 2025-02-20.',
+          'Task đầu tiên là ngày `day_of_week` đầu tiên >= loop_start_date.',
       },
       loop_end_date: {
         type:        'string',
@@ -134,10 +134,8 @@ const createWeeklyTasksDeclaration = {
         type:        'string',
         enum:        ['TODO', 'CLASS', 'EXAM'],
         description:
-          'TODO = việc cần làm lặp lại (gym, uống thuốc, đi chợ, họp định kỳ...). ' +
-          'CLASS = lịch học/buổi học định kỳ (TKB). ' +
-          'EXAM = lịch thi (hiếm khi lặp tuần, nhưng có thể). ' +
-          'Mặc định TODO nếu không rõ.',
+          'TODO = việc cần làm lặp lại. CLASS = lịch học/buổi học định kỳ (TKB). ' +
+          'EXAM = lịch thi. Mặc định TODO nếu không rõ.',
       },
       tag_ids: {
         type:  'array',
@@ -153,43 +151,74 @@ const createWeeklyTasksDeclaration = {
   },
 };
 
+// ─────────────────────────────────────────────────────────────
+// read_attachment — UNIFIED 2026-05-31: dùng file_name + allowedAttachmentIds
+// ─────────────────────────────────────────────────────────────
+const readAttachmentDeclaration = {
+  name: 'read_attachment',
+  description:
+    'Đọc nội dung văn bản của 1 file đính kèm (PDF / Word / Excel / CSV / TXT / HTML) ' +
+    'có trong cuộc hội thoại hiện tại — bao gồm file từ email/news context HOẶC ' +
+    'file user đã upload trực tiếp vào AI Chat. ' +
+    'Server đã extract text trước, KHÔNG upload binary nên rẻ token. ' +
+    'CHỈ gọi khi user thực sự cần thông tin từ FILE (vd "tóm tắt file PDF", ' +
+    '"file Excel có sheet gì", "trong file plan nói gì"). ' +
+    'KHÔNG gọi nếu user chỉ hỏi về nội dung email/news — phần đó đã có sẵn trong context. ' +
+    'KHÔNG gọi với file ảnh / video / audio (chưa hỗ trợ extract). ' +
+    'Có thể gọi nhiều lần cho nhiều file khác nhau trong cùng turn. ' +
+    'Nếu kết quả có `truncated: true` thì cảnh báo user là file đã bị cắt bớt.',
+  parameters: {
+    type: 'object',
+    properties: {
+      file_name: {
+        type:        'string',
+        description:
+          'TÊN file đính kèm — copy CHÍNH XÁC từ mục "FILE ĐÍNH KÈM" trong system instruction, ' +
+          'bao gồm cả phần mở rộng (.pdf, .xlsx, ...). ' +
+          'Vd: "lich_thi.pdf", "report_slides (2).html". ' +
+          'TUYỆT ĐỐI không bịa tên hay UUID — chỉ dùng tên đã liệt kê. ' +
+          'Nếu instruction không có file nào → KHÔNG gọi tool này, ' +
+          'trả lời user là không có file đính kèm.',
+      },
+    },
+    required: ['file_name'],
+  },
+};
+
 export const TASK_TOOL_DECLARATIONS = [
   createTaskDeclaration,
   createWeeklyTasksDeclaration,
+  readAttachmentDeclaration,
 ];
 
 // ─────────────────────────────────────────────────────────────
 // System note — gắn kèm system instruction để model biết tool & tag
 // ─────────────────────────────────────────────────────────────
-/**
- * @param {Object}  opts
- * @param {Array=}  opts.tags  — [{ id, name, color_hex }, ...] của user
- */
 export const buildToolSystemNote = ({ tags = [] } = {}) => {
   const lines = [
-    'Bạn có các tool sau để thao tác task cho user:',
+    'Bạn có các tool sau:',
     '  - `create_task`: tạo 1 task đơn lẻ.',
-    '  - `create_weekly_tasks`: tạo nhiều task LẶP HẰNG TUẦN trong 1 khoảng thời gian.',
+    '  - `create_weekly_tasks`: tạo nhiều task LẶP HẰNG TUẦN.',
+    '  - `read_attachment`: đọc text file đính kèm theo TÊN FILE (chỉ gọi khi user hỏi về file).',
     `Hôm nay là ${new Date().toISOString()} (UTC). Múi giờ user: +07:00 (giờ VN).`,
     '',
     'Khi user yêu cầu "tạo task", "thêm việc", "nhắc tôi"... cho 1 sự kiện đơn → `create_task`.',
-    'Khi user yêu cầu task LẶP HẰNG TUẦN (TKB, gym mỗi T3, uống thuốc mỗi sáng,',
-    'họp định kỳ thứ 6, v.v.) → `create_weekly_tasks`. Mỗi (thứ × khoảng) gọi 1 lần.',
+    'Khi user yêu cầu task LẶP HẰNG TUẦN → `create_weekly_tasks`.',
     'KHÔNG dùng `create_task` rồi loop tay nhiều lần — tốn token và sai design.',
+    '',
+    'QUAN TRỌNG về `read_attachment`:',
+    '  - Tham số là TÊN FILE (file_name) — copy NGUYÊN VĂN từ phần "FILE ĐÍNH KÈM".',
+    '  - KHÔNG truyền UUID hay id giả định nào.',
+    '  - Nếu phần "FILE ĐÍNH KÈM" không xuất hiện hoặc rỗng → không có file → KHÔNG gọi tool.',
     '',
     'QUAN TRỌNG về `create_weekly_tasks`:',
     '  - Server chỉ nhận NGÀY CỤ THỂ: `loop_start_date` và `loop_end_date` (YYYY-MM-DD).',
     '  - AI tự convert mô tả thời gian thành ngày trước khi gọi tool.',
-    '    Vd "trong 1 tháng tới" → loop_start = hôm nay, loop_end = hôm nay + 30 ngày.',
-    '    Vd "đến hết tháng 6" → AI tự tính ra loop_end = ngày cuối tháng 6.',
-    '  - Convention `day_of_week`: ISO 8601 (1=Thứ 2 ... 7=Chủ Nhật). KHÔNG nhầm với CTT HUST (2..8).',
-    '  - Trường hợp TKB HUST (user paste "tuần 25-32"): AI cần biết Tuần 1 của kỳ bắt đầu hôm nào',
-    '    để convert ra ngày thực. Nếu user CHƯA cho biết → HỎI trước, TUYỆT ĐỐI không tự đoán.',
-    '  - Khoảng không liên tục ("tuần 25-32, 34-42") → gọi tool NHIỀU LẦN, mỗi khoảng 1 lần.',
-    '  - Nhiều thứ trong tuần ("gym T3 và T5") → gọi NHIỀU LẦN, mỗi thứ 1 lần.',
+    '  - Convention `day_of_week`: ISO 8601 (1=Thứ 2 ... 7=Chủ Nhật).',
+    '  - Trường hợp TKB HUST: nếu user CHƯA cho biết Tuần 1 → HỎI trước, KHÔNG đoán.',
     '',
-    'Sau khi tool chạy xong, trả lời user bằng tiếng Việt, ngắn gọn, xác nhận đã tạo (hoặc báo lỗi).',
-    'Tuyệt đối KHÔNG nói "tôi đã tạo task" nếu chưa thực sự gọi tool.',
+    'Sau khi tool chạy xong, trả lời user bằng tiếng Việt, ngắn gọn.',
+    'TUYỆT ĐỐI không nói "đã tạo/đã đọc" nếu chưa thực sự gọi tool.',
   ];
 
   if (tags.length > 0) {
@@ -210,18 +239,8 @@ export const buildToolSystemNote = ({ tags = [] } = {}) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// User profile system note
+// User profile system note (giữ nguyên)
 // ─────────────────────────────────────────────────────────────
-/**
- * buildUserInfoSystemNote — sinh đoạn note mô tả user đang chat.
- * Được prepend vào systemInstruction (KHÔNG nằm trong messages) nên
- * KHÔNG bao giờ hiện ở chat UI.
- *
- * @param {Object}  opts
- * @param {Object=} opts.userInfo   — row từ bảng user_info, có thể null
- * @param {string=} opts.userEmail  — email từ bảng users
- * @returns {string}
- */
 export const buildUserInfoSystemNote = ({ userInfo = null, userEmail = null } = {}) => {
   const lines = [];
 
@@ -242,24 +261,27 @@ export const buildUserInfoSystemNote = ({ userInfo = null, userEmail = null } = 
     'trong reply trừ khi user hỏi trực tiếp về profile của họ):',
     ...lines,
     'Ưu tiên xưng hô theo tên ngắn khi phù hợp.',
-    'Tận dụng khoá học (vd K66 → năm 4, K68 → năm 2) và ngành để gợi ý task chính xác hơn.',
+    'Tận dụng khoá học và ngành để gợi ý task chính xác hơn.',
   ].join('\n');
 };
 
 // ─────────────────────────────────────────────────────────────
-// Executor factory
+// Executor factory — UNIFIED 2026-05-31
 // ─────────────────────────────────────────────────────────────
 /**
- * @param {Object}  ctx
- * @param {string}  ctx.userId
- * @param {string=} ctx.sourceType  — 'MANUAL' | 'EMAIL' | 'NEWS' | 'CTT'  (mặc định 'MANUAL')
- * @param {string=} ctx.sourceId    — UUID của source khi sourceType != 'MANUAL'
- * @returns {Function}  async (toolName, args) => result
+ * @param {Object}   ctx
+ * @param {string}   ctx.userId
+ * @param {string=}  ctx.sourceType            — 'MANUAL' | 'EMAIL' | 'NEWS' | 'CTT'
+ * @param {string=}  ctx.sourceId              — UUID source (cho task tracking)
+ * @param {string[]=}ctx.allowedAttachmentIds  — UUID attachments user được phép đọc
+ *                                                trong cuộc hội thoại này
+ * @returns {Function}
  */
 export const makeTaskToolExecutor = ({
   userId,
-  sourceType = 'MANUAL',
-  sourceId   = null,
+  sourceType            = 'MANUAL',
+  sourceId              = null,
+  allowedAttachmentIds  = [],
 }) => {
   if (!userId) throw new Error('makeTaskToolExecutor: userId là bắt buộc');
 
@@ -268,16 +290,29 @@ export const makeTaskToolExecutor = ({
       return await execCreateTask({ args, userId, sourceType, sourceId });
     }
     if (toolName === 'create_weekly_tasks') {
-      // KHÔNG còn auto-override source_type='CTT' nữa — tool đã tổng quát,
-      // không nhất thiết là TKB. Caller (route handler) quyết định source.
       return await execCreateWeeklyTasks({ args, userId, sourceType, sourceId });
+    }
+    if (toolName === 'read_attachment') {
+      const fileName = (args?.file_name ?? '').toString().trim();
+      if (!fileName) return { success: false, error: 'Thiếu file_name.' };
+      if (!Array.isArray(allowedAttachmentIds) || allowedAttachmentIds.length === 0) {
+        return {
+          success: false,
+          error:   'Không có file đính kèm nào trong cuộc hội thoại để đọc.',
+        };
+      }
+      return await extractAttachmentTextByFileNameInIds({
+        fileName,
+        allowedIds: allowedAttachmentIds,
+        userId,
+      });
     }
     return { success: false, error: `Tool "${toolName}" không được hỗ trợ.` };
   };
 };
 
 // ─────────────────────────────────────────────────────────────
-// Helpers
+// Helpers — không đổi
 // ─────────────────────────────────────────────────────────────
 const normalizeTs = (v) => {
   if (v === undefined || v === null) return null;
@@ -293,7 +328,6 @@ const sanitizeTagIds = (raw) => {
   )];
 };
 
-/** "14:10" → "14:10:00"; trả null nếu sai format. */
 const normalizeTimeOfDay = (v) => {
   if (typeof v !== 'string') return null;
   const m = v.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
@@ -305,22 +339,16 @@ const normalizeTimeOfDay = (v) => {
   return `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 };
 
-/**
- * "YYYY-MM-DD" → epoch ms tại 00:00 UTC của ngày đó.
- * Trả null nếu format sai hoặc ngày không tồn tại (vd "2025-02-30").
- */
 const parseDateIso = (iso) => {
   if (typeof iso !== 'string') return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return null;
   const [y, m, d] = iso.split('-').map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d));
   if (Number.isNaN(dt.getTime())) return null;
-  // Roundtrip check: bắt được "2025-02-30" → JS sẽ overflow thành 2025-03-02.
   if (formatDateIso(dt) !== iso) return null;
   return dt.getTime();
 };
 
-/** Date → "YYYY-MM-DD" (UTC parts). */
 const formatDateIso = (dt) => {
   const y = dt.getUTCFullYear();
   const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
@@ -328,20 +356,17 @@ const formatDateIso = (dt) => {
   return `${y}-${m}-${d}`;
 };
 
-/** ISO 8601 weekday: 1=Mon ... 7=Sun. */
 const isoWeekday = (dt) => {
-  const j = dt.getUTCDay(); // 0=Sun..6=Sat
+  const j = dt.getUTCDay();
   return j === 0 ? 7 : j;
 };
 
 // ─────────────────────────────────────────────────────────────
-// execCreateTask — không đổi
+// execCreateTask + execCreateWeeklyTasks — không đổi
 // ─────────────────────────────────────────────────────────────
 const execCreateTask = async ({ args, userId, sourceType, sourceId }) => {
   const title = (args?.title ?? '').toString().trim();
-  if (!title) {
-    return { success: false, error: 'Thiếu title — không thể tạo task.' };
-  }
+  if (!title) return { success: false, error: 'Thiếu title — không thể tạo task.' };
 
   const taskType = (args?.task_type ?? 'TODO').toString().toUpperCase();
   if (!['TODO', 'CLASS', 'EXAM'].includes(taskType)) {
@@ -408,74 +433,54 @@ const execCreateTask = async ({ args, userId, sourceType, sourceId }) => {
   }
 };
 
-// ─────────────────────────────────────────────────────────────
-// execCreateWeeklyTasks — TỔNG QUÁT (v5)
-//
-// Iterate ngày trong [loop_start_date .. loop_end_date], chọn những
-// ngày rơi vào day_of_week, sinh 1 task/ngày trong 1 transaction.
-// ─────────────────────────────────────────────────────────────
 const execCreateWeeklyTasks = async ({ args, userId, sourceType, sourceId }) => {
-  // ---- Validate title ----
   const title = (args?.title ?? '').toString().trim();
   if (!title) return { success: false, error: 'Thiếu title.' };
 
-  // ---- Validate day_of_week (ISO 1..7) ----
   const dayOfWeek = Number(args?.day_of_week);
   if (!Number.isInteger(dayOfWeek) || dayOfWeek < 1 || dayOfWeek > 7) {
     return {
       success: false,
-      error: `day_of_week không hợp lệ (cần 1..7 theo ISO 8601: 1=Thứ 2 ... 7=Chủ Nhật, ` +
-             `nhận: ${args?.day_of_week}).`,
+      error: `day_of_week không hợp lệ (cần 1..7 ISO, nhận: ${args?.day_of_week}).`,
     };
   }
 
-  // ---- Validate loop range ----
   const loopStart = String(args?.loop_start_date ?? '').trim();
   const loopEnd   = String(args?.loop_end_date ?? '').trim();
   const startMs   = parseDateIso(loopStart);
   const endMs     = parseDateIso(loopEnd);
   if (startMs === null) {
-    return { success: false, error: `loop_start_date phải dạng YYYY-MM-DD và là ngày hợp lệ (nhận: "${loopStart}").` };
+    return { success: false, error: `loop_start_date phải dạng YYYY-MM-DD (nhận: "${loopStart}").` };
   }
   if (endMs === null) {
-    return { success: false, error: `loop_end_date phải dạng YYYY-MM-DD và là ngày hợp lệ (nhận: "${loopEnd}").` };
+    return { success: false, error: `loop_end_date phải dạng YYYY-MM-DD (nhận: "${loopEnd}").` };
   }
   if (startMs > endMs) {
-    return { success: false, error: `loop_start_date (${loopStart}) phải <= loop_end_date (${loopEnd}).` };
+    return { success: false, error: `loop_start_date phải <= loop_end_date.` };
   }
 
-  // ---- Validate times of day (BOTH hoặc NEITHER) ----
   const rawStart = args?.start_time_of_day;
   const rawEnd   = args?.end_time_of_day;
   const startHm  = rawStart ? normalizeTimeOfDay(rawStart) : null;
   const endHm    = rawEnd   ? normalizeTimeOfDay(rawEnd)   : null;
-  if (rawStart && !startHm) return { success: false, error: `start_time_of_day không hợp lệ: "${rawStart}"` };
-  if (rawEnd && !endHm)     return { success: false, error: `end_time_of_day không hợp lệ: "${rawEnd}"` };
+  if (rawStart && !startHm) return { success: false, error: `start_time_of_day không hợp lệ.` };
+  if (rawEnd && !endHm)     return { success: false, error: `end_time_of_day không hợp lệ.` };
   if (Boolean(startHm) !== Boolean(endHm)) {
-    return {
-      success: false,
-      error: 'Phải cung cấp CẢ start_time_of_day và end_time_of_day, hoặc bỏ qua cả hai.',
-    };
+    return { success: false, error: 'Phải cung cấp CẢ start_time_of_day và end_time_of_day, hoặc bỏ qua cả hai.' };
   }
   const hasTime = Boolean(startHm && endHm);
 
-  // ---- Validate task_type ----
   const taskType = (args?.task_type ?? 'TODO').toString().toUpperCase();
   if (!['TODO', 'CLASS', 'EXAM'].includes(taskType)) {
-    return { success: false, error: `task_type không hợp lệ: "${taskType}". Phải là TODO, CLASS, hoặc EXAM.` };
+    return { success: false, error: `task_type không hợp lệ: "${taskType}".` };
   }
 
   const description = args?.description ? String(args.description).trim() : null;
   const tagIds      = sanitizeTagIds(args?.tag_ids);
 
-  // ─────────────────────────────────────────────────
-  // Build session date list
-  // ─────────────────────────────────────────────────
-  // Tìm ngày đầu tiên >= loop_start_date mà rơi vào day_of_week.
-  // Sau đó cộng dồn 7 ngày cho đến khi vượt loop_end_date.
   const startDt    = new Date(startMs);
-  const startDow   = isoWeekday(startDt);                 // 1..7
-  const advance    = (dayOfWeek - startDow + 7) % 7;      // 0..6 days to advance
+  const startDow   = isoWeekday(startDt);
+  const advance    = (dayOfWeek - startDow + 7) % 7;
 
   const dates = [];
   const cursor = new Date(startMs);
@@ -492,24 +497,18 @@ const execCreateWeeklyTasks = async ({ args, userId, sourceType, sourceId }) => 
     };
   }
 
-  // Build start_time / end_time ISO 8601 với offset +07:00 (giờ VN).
-  //   - Có time-of-day: dùng giờ AI cung cấp.
-  //   - Không có: start_time = null, end_time = ngày đó lúc 23:59 (deadline cuối ngày).
   const sessions = dates.map((d) => ({
     start_time: hasTime ? `${d}T${startHm}+07:00` : null,
     end_time:   hasTime ? `${d}T${endHm}+07:00`   : `${d}T23:59:00+07:00`,
   }));
 
-  // ─────────────────────────────────────────────────
-  // Insert batch trong 1 transaction
-  // ─────────────────────────────────────────────────
   const client = await getClient();
   try {
     await client.query('BEGIN');
 
     const titles       = sessions.map(() => title);
     const descriptions = sessions.map(() => description);
-    const startTimes   = sessions.map((s) => s.start_time);   // text[] có thể chứa null
+    const startTimes   = sessions.map((s) => s.start_time);
     const endTimes     = sessions.map((s) => s.end_time);
 
     const { rows: taskRows } = await client.query(
@@ -526,7 +525,6 @@ const execCreateWeeklyTasks = async ({ args, userId, sourceType, sourceId }) => 
       ],
     );
 
-    // Attach tags: cross product mỗi task × mỗi valid tag
     let attachedTags = [];
     if (tagIds.length > 0 && taskRows.length > 0) {
       const valid = await client.query(
@@ -553,7 +551,6 @@ const execCreateWeeklyTasks = async ({ args, userId, sourceType, sourceId }) => 
 
     await client.query('COMMIT');
 
-    // Sort task rows theo start_time (fallback end_time nếu start null)
     taskRows.sort((a, b) => {
       const ka = new Date(a.start_time ?? a.end_time).getTime();
       const kb = new Date(b.start_time ?? b.end_time).getTime();
@@ -568,11 +565,10 @@ const execCreateWeeklyTasks = async ({ args, userId, sourceType, sourceId }) => 
         title,
         task_type:        taskType,
         created:          taskRows.length,
-        skipped:          0,                 // Logic mới không có gì để skip
-        day_of_week:      dayOfWeek,         // ISO 1..7
+        skipped:          0,
+        day_of_week:      dayOfWeek,
         loop_start_date:  loopStart,
         loop_end_date:    loopEnd,
-        // Có thể null khi không có time-of-day. Mapper client fall back về end_time.
         first_start_time: first?.start_time ?? null,
         last_start_time:  last?.start_time  ?? null,
         first_end_time:   first?.end_time   ?? null,

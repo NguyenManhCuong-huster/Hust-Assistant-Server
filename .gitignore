@@ -3,5 +3,5 @@ node_modules/
 *.log
 postgres_data/
 pgadmin_data/
-package-lock.json
+
 uploads/

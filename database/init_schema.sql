@@ -4,7 +4,9 @@ CREATE TYPE provider_type    AS ENUM ('GMAIL', 'OUTLOOK', 'CTT');
 CREATE TYPE task_category    AS ENUM ('TODO', 'CLASS', 'EXAM');
 CREATE TYPE source_origin    AS ENUM ('MANUAL', 'EMAIL', 'NEWS', 'CTT');
 CREATE TYPE account_status   AS ENUM ('ACTIVE', 'EXPIRED', 'REVOKED');
-CREATE TYPE attachment_owner AS ENUM ('NEWS', 'EMAIL');
+-- 'AI_CHAT' = file user upload trực tiếp từ standalone AI chat
+--             (owner_id = user_id). 'NEWS'/'EMAIL' giữ owner_id = news_id/email_id.
+CREATE TYPE attachment_owner AS ENUM ('NEWS', 'EMAIL', 'AI_CHAT');
 
 -- ═════════════════════════════════════════════════════════════ USERS
 CREATE TABLE "users" (
@@ -128,6 +130,23 @@ CREATE INDEX idx_emails_account_id  ON "emails"(account_id);
 CREATE INDEX idx_emails_received_at ON "emails"(received_at DESC);
 CREATE INDEX idx_emails_thread_time ON "emails"(gmail_thread_id, received_at);
 
+-- ═════════════════════════════════════════════════════════════ ATTACHMENTS
+-- 1 bảng dùng chung cho 3 loại file:
+--   owner_type='EMAIL'   → owner_id = emails.id
+--   owner_type='NEWS'    → owner_id = news.id
+--   owner_type='AI_CHAT' → owner_id = users.id (file user upload trực tiếp trong AI chat)
+-- UNIQUE (owner_type, owner_id, file_name): server phải tự suffix "(2)", "(3)"
+-- khi user upload trùng tên file trong cùng AI chat.
+--
+-- NOTE về `is_inline` (SỬA 2026-06):
+--   Cờ này được set từ gmailService.partDisposition() khi sync email.
+--   Trước đây buildAttachmentsSystemNote() filter `!is_inline` để giấu inline
+--   image. NHƯNG nhiều mail client (Outlook, mail relay...) gắn Content-ID
+--   cho MỌI part khiến file PDF/HTML/DOCX bị đánh nhầm `is_inline=TRUE` → AI
+--   không thấy file → "AI không đọc được file".
+--   Logic mới: filter dựa trên MIME/extension qua isTextExtractable() — cờ
+--   `is_inline` không còn ảnh hưởng tới việc AI có thấy file hay không. Cờ vẫn
+--   giữ lại để UI có thể tham chiếu nếu cần (vd phân biệt ảnh embed vs avatar).
 CREATE TABLE "attachments" (
   id                  UUID             PRIMARY KEY DEFAULT uuid_generate_v4(),
   owner_type          attachment_owner NOT NULL,
@@ -139,6 +158,8 @@ CREATE TABLE "attachments" (
   source_url          TEXT,
   gmail_attachment_id TEXT,
   is_inline           BOOLEAN          DEFAULT FALSE,
+  extracted_text      TEXT,
+  extracted_at        TIMESTAMPTZ,
   created_at          TIMESTAMPTZ      DEFAULT CURRENT_TIMESTAMP,
   mod_time            TIMESTAMPTZ      DEFAULT CURRENT_TIMESTAMP,
   is_deleted          BOOLEAN          DEFAULT FALSE,
@@ -149,7 +170,7 @@ CREATE TABLE "attachments" (
 CREATE INDEX idx_attachments_owner   ON "attachments"(owner_type, owner_id);
 CREATE INDEX idx_attachments_modtime ON "attachments"(mod_time);
 
--- Cascade soft-delete: khi 1 email/news bị soft-delete → attachments của nó
+-- Cascade soft-delete: khi 1 email/news/user bị soft-delete → attachments của nó
 -- cũng soft-delete theo. Không xoá file đĩa (cleanup job riêng).
 CREATE OR REPLACE FUNCTION fn_cascade_delete_attachments() RETURNS TRIGGER AS $$
 BEGIN
@@ -161,6 +182,10 @@ BEGIN
     UPDATE attachments
        SET is_deleted = TRUE, mod_time = CURRENT_TIMESTAMP
      WHERE owner_type = 'NEWS' AND owner_id = NEW.id AND NEW.is_deleted = TRUE;
+  ELSIF TG_TABLE_NAME = 'users' THEN
+    UPDATE attachments
+       SET is_deleted = TRUE, mod_time = CURRENT_TIMESTAMP
+     WHERE owner_type = 'AI_CHAT' AND owner_id = NEW.id AND NEW.is_deleted = TRUE;
   END IF;
   RETURN NEW;
 END;
@@ -173,6 +198,11 @@ EXECUTE FUNCTION fn_cascade_delete_attachments();
 
 CREATE TRIGGER trg_news_soft_delete_attachments
 AFTER UPDATE OF is_deleted ON news
+FOR EACH ROW WHEN (NEW.is_deleted = TRUE AND OLD.is_deleted = FALSE)
+EXECUTE FUNCTION fn_cascade_delete_attachments();
+
+CREATE TRIGGER trg_users_soft_delete_attachments
+AFTER UPDATE OF is_deleted ON users
 FOR EACH ROW WHEN (NEW.is_deleted = TRUE AND OLD.is_deleted = FALSE)
 EXECUTE FUNCTION fn_cascade_delete_attachments();
 
@@ -219,3 +249,16 @@ CREATE TABLE "task_tag_cross_ref" (
   PRIMARY KEY (task_id, tag_id)
 );
 CREATE INDEX idx_ttcr_tag_id ON "task_tag_cross_ref"(tag_id);
+
+-- ═════════════════════════════════════════════════════════════ DATA REPAIR
+-- Idempotent: reset cờ `is_inline=TRUE` sai trên DB tồn tại từ phiên bản trước
+-- (do gmailService.partDisposition() cũ coi Content-ID là dấu hiệu inline).
+-- Trên DB tươi: 0 row affected, no-op. Trên DB cũ rerun init_schema sau khi
+-- DROP & recreate: cũng 0 row. Statement này chỉ phát huy tác dụng khi bạn
+-- chạy thủ công UPDATE này 1 lần trên DB production còn data cũ.
+UPDATE attachments
+   SET is_inline = FALSE,
+       mod_time  = CURRENT_TIMESTAMP
+ WHERE owner_type = 'EMAIL'
+   AND is_inline  = TRUE
+   AND (mime_type IS NULL OR mime_type NOT ILIKE 'image/%');

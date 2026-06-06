@@ -84,15 +84,30 @@ const extractBody = (payload) => {
 };
 
 /**
- * Tìm header "Content-Disposition" hoặc "Content-ID" của 1 part.
- * Trả về { isInline: bool } — true nếu part có Content-Disposition: inline
- * hoặc có Content-ID (= image embed trong HTML).
+ * Xác định 1 part có phải inline hay không, CHỈ dựa trên Content-Disposition.
+ *
+ * SỬA (bug fix "AI không đọc được file đính kèm email"):
+ *   Phiên bản cũ: `isInline = /inline/i.test(disp) || !!cid` — coi Content-ID
+ *   là dấu hiệu inline. SAI về mặt MIME — Content-ID chỉ là định danh duy nhất
+ *   cho 1 body part trong multipart message. Nhiều email client (Outlook,
+ *   calendar invite, mail relay tự động) gắn Content-ID cho MỌI part, bao gồm
+ *   cả file đính kèm thông thường.
+ *   → File thật (PDF/HTML/DOCX...) bị đánh nhầm `is_inline = TRUE` trong DB.
+ *   → buildAttachmentsSystemNote filter chúng đi.
+ *   → AI tin là không có file, không gọi read_attachment.
+ *
+ *   Now: CHỈ tin Content-Disposition. Default (không có header) → attachment.
+ *   Image embed trong HTML body (cid:) thực sự inline đều có
+ *   "Content-Disposition: inline" sẵn nên không mất usecase ban đầu.
+ *
+ *   Đồng thời lưu ý: tầng filter ở aiService.buildAttachmentsSystemNote() cũng
+ *   đã đổi sang lọc theo `isTextExtractable(mime, fileName)` thay vì lệ thuộc
+ *   `is_inline`, nên bug này dù gặp lại cũng không hide file nữa.
  */
 const partDisposition = (part) => {
   const headers = part.headers ?? [];
   const disp = headers.find((h) => h.name.toLowerCase() === 'content-disposition')?.value ?? '';
-  const cid  = headers.find((h) => h.name.toLowerCase() === 'content-id')?.value;
-  const isInline = /inline/i.test(disp) || !!cid;
+  const isInline = /inline/i.test(disp);
   return { isInline };
 };
 
