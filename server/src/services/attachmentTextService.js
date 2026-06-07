@@ -39,9 +39,9 @@ import {
 // ─────────────────────────────────────────────────────────────
 // Limits
 // ─────────────────────────────────────────────────────────────
-const MAX_TEXT_CHARS = 60_000;
-const HEAD_CHARS     = 40_000;
-const TAIL_CHARS     = 20_000;
+const MAX_TEXT_CHARS = 300_000;
+const HEAD_CHARS     = 200_000;
+const TAIL_CHARS     = 100_000;
 
 // ─────────────────────────────────────────────────────────────
 // Text-extractable detector — đọc env 1 lần lúc module load.

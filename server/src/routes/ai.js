@@ -167,6 +167,73 @@ const collectEffectiveAttachments = async ({
   };
 };
 
+// ─────────────────────────────────────────────────────────────
+// prepareInlineImages — MỚI 2026-06.
+//
+// Đọc bytes của các ảnh trong attachmentList → return Map<id, {mimeType, base64Data}>
+// cho aiService.chat() chèn vào contents[].parts dưới dạng inlineData.
+//
+// Đồng thời "gắn" những ảnh chưa được message nào reference vào ATTACHMENTS
+// của user message ĐẦU TIÊN — để chúng xuất hiện đúng cấu trúc turn-based
+// trong contents (vd ảnh trong email signature thuộc thread context, không
+// có message nào của user reference, nên cần đính vào turn đầu tiên).
+//
+// Mutate `messages` in-place (chỉ trường .attachments — append, không xoá).
+//
+// Trả về:
+//   { inlineDataMap, attachedSourceImageIds }
+//   - inlineDataMap: như trên (Map UUID → {mimeType, base64Data, file_name, sizeBytes})
+//   - attachedSourceImageIds: list ID source ảnh đã append vào first user message
+//                              (để log/debug)
+// ─────────────────────────────────────────────────────────────
+const prepareInlineImages = async ({ messages, attachmentList }) => {
+  // 1) Đọc bytes ảnh
+  const inlineDataMap = await att.readInlineImagesByRows(attachmentList);
+
+  if (inlineDataMap.size === 0) {
+    return { inlineDataMap, attachedSourceImageIds: [] };
+  }
+
+  // 2) Xác định ID nào đã được reference trong message.attachments[] sẵn
+  const referencedInMessages = new Set();
+  for (const m of messages) {
+    for (const a of m.attachments || []) {
+      if (a.id) referencedInMessages.add(a.id);
+    }
+  }
+
+  // 3) Ảnh nào CÓ trong inlineDataMap mà CHƯA message nào reference
+  //    → là source attachment (email signature, news image...) → đính vào first user msg.
+  const orphanImageIds = [];
+  for (const [id, info] of inlineDataMap.entries()) {
+    if (!referencedInMessages.has(id)) {
+      orphanImageIds.push({ id, file_name: info.file_name });
+    }
+  }
+
+  if (orphanImageIds.length > 0) {
+    const firstUserMsg = messages.find((m) => m.role === 'user');
+    if (firstUserMsg) {
+      firstUserMsg.attachments = [
+        ...(firstUserMsg.attachments || []),
+        ...orphanImageIds,
+      ];
+    } else {
+      // Edge case: history toàn assistant message (gần như không xảy ra
+      // vì chat luôn bắt đầu bằng user). Bỏ qua + log để debug.
+      console.warn(
+        `[inline-image] no user message to attach ${orphanImageIds.length} ` +
+        `source images → AI sẽ không nhìn thấy chúng.`,
+      );
+    }
+  }
+
+  return {
+    inlineDataMap,
+    attachedSourceImageIds: orphanImageIds.map((x) => x.id),
+  };
+};
+
 // ═════════════════════════════════════════════════════════════
 // POST /api/ai/upload-attachment
 //
@@ -235,9 +302,17 @@ router.post('/chat', async (req, res, next) => {
         : fileNote;
     }
 
+    // ── MỚI 2026-06: đọc bytes các ảnh + append "orphan" source images vào
+    //    first user message (nếu có). Standalone thường không có source
+    //    attachments, nhưng vẫn gọi helper để code thống nhất.
+    const { inlineDataMap, attachedSourceImageIds } =
+      await prepareInlineImages({ messages, attachmentList: effective.attachmentList });
+
     console.log(
       `[ai/chat] user=${req.user.id} msgs=${messages.length} ` +
       `effective=${effective.attachmentList.length} ` +
+      `inline_images=${inlineDataMap.size} ` +
+      `orphan_attached=${attachedSourceImageIds.length} ` +
       `files=[${effective.attachmentList.map((a) => a.file_name).join(', ')}]`,
     );
 
@@ -250,6 +325,7 @@ router.post('/chat', async (req, res, next) => {
         sourceType:           'MANUAL',
         allowedAttachmentIds: effective.allowedIds,
       }),
+      inlineDataMap,
     });
 
     res.json({
@@ -345,9 +421,14 @@ router.post('/email-chat', async (req, res, next) => {
       sourceAttachments: sourceAtts,
     });
 
+    // ── 3b. MỚI 2026-06: chuẩn bị inline images ──
+    const { inlineDataMap, attachedSourceImageIds } =
+      await prepareInlineImages({ messages, attachmentList: effective.attachmentList });
+
     console.log(
       `[ai/email-chat] anchor=${anchor.id} thread_msgs=${threadEmailIds.length} ` +
       `source_atts=${sourceAtts.length} effective=${effective.attachmentList.length} ` +
+      `inline_images=${inlineDataMap.size} orphan_attached=${attachedSourceImageIds.length} ` +
       `files=[${effective.attachmentList.map((a) => a.file_name).join(', ')}]`,
     );
 
@@ -369,6 +450,7 @@ router.post('/email-chat', async (req, res, next) => {
         sourceId:             anchor.id,
         allowedAttachmentIds: effective.allowedIds,
       }),
+      inlineDataMap,
     });
 
     res.json({
@@ -423,9 +505,14 @@ router.post('/news-chat', async (req, res, next) => {
       sourceAttachments: sourceAtts,
     });
 
+    // ── 3b. MỚI 2026-06: chuẩn bị inline images ──
+    const { inlineDataMap, attachedSourceImageIds } =
+      await prepareInlineImages({ messages, attachmentList: effective.attachmentList });
+
     console.log(
       `[ai/news-chat] news=${news.id} source_atts=${sourceAtts.length} ` +
       `effective=${effective.attachmentList.length} ` +
+      `inline_images=${inlineDataMap.size} orphan_attached=${attachedSourceImageIds.length} ` +
       `files=[${effective.attachmentList.map((a) => a.file_name).join(', ')}]`,
     );
 
@@ -447,6 +534,7 @@ router.post('/news-chat', async (req, res, next) => {
         sourceId:             news.id,
         allowedAttachmentIds: effective.allowedIds,
       }),
+      inlineDataMap,
     });
 
     res.json({
@@ -472,25 +560,42 @@ router.post('/news-chat', async (req, res, next) => {
 
 /**
  * Build mini system instruction note cho standalone chat khi user upload file.
- * Khác buildAttachmentsSystemNote (vốn dùng cho email/news có header rõ ràng) —
- * note này tự đứng vì standalone không có "EMAIL THREAD" / "NEWS ARTICLE" header.
  *
- * SỬA (bug fix): filter theo isTextExtractable (đọc ENV) thay vì `!is_inline`.
- * Match logic với aiService.buildAttachmentsSystemNote().
+ * UPDATED 2026-06: liệt kê CẢ file text VÀ file ảnh thành 2 block riêng,
+ * giống aiService.buildAttachmentsSystemNote() (logic share không được vì
+ * standalone không có header email/news).
  */
 const buildFileListNote = (attachmentList) => {
-  const visible = (attachmentList || []).filter((a) =>
-    isTextExtractable(a.mime_type, a.file_name),
-  );
-  if (visible.length === 0) return '';
-  const lines = ['═════════ FILE ĐÍNH KÈM ═════════'];
-  lines.push('(Khi user hỏi nội dung file, gọi tool `read_attachment` với `file_name`');
-  lines.push(' = tên file copy nguyên văn từ danh sách dưới đây.)');
-  for (const a of visible) {
-    const sizeKb = a.size_bytes ? `${Math.round(a.size_bytes / 1024)} KB` : '?';
-    const notReady = a.is_downloaded ? '' : ' [chưa tải xong, không đọc được]';
-    lines.push(`  - "${a.file_name}" (${a.mime_type ?? '?'}, ${sizeKb})${notReady}`);
+  const list = attachmentList || [];
+  const textVisible  = list.filter((a) => isTextExtractable(a.mime_type, a.file_name));
+  const imageVisible = list.filter((a) => att.isInlineImageMime(a.mime_type));
+
+  const lines = [];
+
+  if (textVisible.length > 0) {
+    lines.push('═════════ FILE ĐÍNH KÈM ═════════');
+    lines.push('(Khi user hỏi nội dung file, gọi tool `read_attachment` với `file_name`');
+    lines.push(' = tên file copy nguyên văn từ danh sách dưới đây.)');
+    for (const a of textVisible) {
+      const sizeKb = a.size_bytes ? `${Math.round(a.size_bytes / 1024)} KB` : '?';
+      const notReady = a.is_downloaded ? '' : ' [chưa tải xong, không đọc được]';
+      lines.push(`  - "${a.file_name}" (${a.mime_type ?? '?'}, ${sizeKb})${notReady}`);
+    }
   }
+
+  if (imageVisible.length > 0) {
+    if (lines.length > 0) lines.push('');
+    lines.push('═════════ ẢNH ĐÍNH KÈM ═════════');
+    lines.push('(Các ảnh dưới đây đã được nhúng TRỰC TIẾP vào message user gửi —');
+    lines.push(' bạn nhìn thấy ảnh ngay trong cuộc hội thoại. TUYỆT ĐỐI KHÔNG gọi');
+    lines.push(' `read_attachment` cho ảnh: tool đó chỉ đọc text, sẽ fail.)');
+    for (const a of imageVisible) {
+      const sizeKb = a.size_bytes ? `${Math.round(a.size_bytes / 1024)} KB` : '?';
+      const notReady = a.is_downloaded ? ' [chưa tải xong, không hiển thị được]' : '';
+      lines.push(`  - "${a.file_name}" (${a.mime_type ?? '?'}, ${sizeKb})${notReady}`);
+    }
+  }
+
   return lines.join('\n');
 };
 

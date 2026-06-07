@@ -1,4 +1,5 @@
 import { isTextExtractable } from './attachmentTextService.js';
+import { isInlineImageMime } from './attachmentService.js';
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
@@ -9,6 +10,46 @@ const getApiKey = () => {
   return key;
 };
 
+/**
+ * Convert 1 message của ta sang 1 content của Gemini.
+ *
+ * MỚI 2026-06: nếu message.attachments có ID nằm trong inlineDataMap → chèn
+ *   `inlineData` parts (ảnh base64) vào TRƯỚC text part. AI nhìn thấy ảnh
+ *   ngay tại message đó trong lịch sử hội thoại (đúng turn user đã gửi).
+ *
+ * Nếu không có attachment ảnh nào & content rỗng, vẫn push 1 text part rỗng
+ * để parts[] không rỗng (yêu cầu của Gemini API).
+ */
+const messageToContent = (m, inlineDataMap) => {
+  const parts = [];
+
+  // 1) Inline image parts (nếu có)
+  if (inlineDataMap && Array.isArray(m.attachments)) {
+    for (const att of m.attachments) {
+      const inline = inlineDataMap.get(att.id);
+      if (!inline) continue;
+      parts.push({
+        inlineData: {
+          mimeType: inline.mimeType,
+          data:     inline.base64Data,
+        },
+      });
+    }
+  }
+
+  // 2) Text part — luôn append nếu có content; nếu chưa có part nào (vd
+  //    user chỉ gửi ảnh mà không có content), push 1 text rỗng cho an toàn.
+  const text = String(m.content ?? '');
+  if (text.length > 0 || parts.length === 0) {
+    parts.push({ text });
+  }
+
+  return {
+    role:  m.role === 'assistant' ? 'model' : 'user',
+    parts,
+  };
+};
+
 export const chat = async ({
   messages,
   systemInstruction = null,
@@ -17,6 +58,7 @@ export const chat = async ({
   tools             = null,
   toolExecutor      = null,
   maxIterations     = 5,
+  inlineDataMap     = null,   // ← MỚI 2026-06: Map<attachment_id, {mimeType, base64Data}>
 }) => {
   if (!Array.isArray(messages) || messages.length === 0) {
     throw new Error('messages phải là array không rỗng');
@@ -24,12 +66,10 @@ export const chat = async ({
 
   const url = `${GEMINI_BASE}/${model || getModel()}:generateContent?key=${getApiKey()}`;
 
-  // Convert messages → Gemini contents. CHỈ giữ text — bỏ qua attachments
-  // (chúng đã được liệt kê trong systemInstruction).
-  const contents = messages.map((m) => ({
-    role:  m.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: String(m.content ?? '') }],
-  }));
+  // Convert messages → Gemini contents. Inline ảnh được nhúng theo từng
+  // message; text-extractable files vẫn đi qua tool `read_attachment`
+  // (xem buildAttachmentsSystemNote).
+  const contents = messages.map((m) => messageToContent(m, inlineDataMap));
 
   const usageAccum = {
     promptTokenCount:     0,
@@ -115,43 +155,55 @@ export const chat = async ({
 };
 
 // ─────────────────────────────────────────────────────────────
-// buildAttachmentsSystemNote — UNIFIED 2026-05-31, fix 2026-06.
+// buildAttachmentsSystemNote — UNIFIED 2026-05-31, mở rộng 2026-06.
 //
-// In ra block "FILE ĐÍNH KÈM" CHỈ THEO TÊN (không UUID). Dùng chung cho cả
-// email/news/standalone chat. Caller gộp attachments từ nhiều nguồn lại rồi
-// pass vào đây.
+// In ra 2 block (chỉ block nào có data mới render):
+//
+//   1. "FILE ĐÍNH KÈM"  — file text-extractable. AI đọc qua `read_attachment`.
+//   2. "ẢNH ĐÍNH KÈM"  — file ảnh đã được nhúng inlineData trực tiếp vào
+//                         contents. AI nhìn thấy ảnh ngay trong turn user
+//                         gửi, KHÔNG cần (và KHÔNG nên) gọi read_attachment.
+//                         Liệt kê tên file để AI có thể correlate "ảnh ABC.png"
+//                         user đề cập với image part nhìn thấy được.
 //
 // `attachments` shape: [{ id, file_name, mime_type, size_bytes, is_downloaded, is_inline }]
 //   - is_downloaded: FALSE → vẫn liệt kê nhưng đánh dấu "chưa tải".
 //
-// SỬA (bug fix "AI không đọc được file đính kèm email"):
-//   Trước đây filter `!a.is_inline`. Nhưng gmailService.partDisposition() cũ
-//   coi Content-ID là dấu hiệu inline → Outlook/mail relay gắn Content-ID cho
-//   mọi part khiến file PDF/HTML/DOCX bị đánh nhầm is_inline=TRUE → bị giấu
-//   khỏi AI → AI tin "không có file" → không gọi read_attachment.
-//
-//   Now: filter theo `isTextExtractable(mime, fileName)`. Chỉ liệt kê file mà
-//   AI thực sự có thể đọc text qua read_attachment. Ưu điểm:
-//     1. Không lệ thuộc cờ `is_inline` (vốn hay bị set sai).
-//     2. Tự động loại bỏ ảnh/video/audio/zip/... mà AI không xử lý được —
-//        đỡ rác system instruction + tránh AI cố đọc rồi fail.
-//   Danh sách extension extract được lấy từ ENV `ATTACHMENT_TEXT_EXTRACT_EXTS`.
+// 2026-06 update: thêm filter `isInlineImageMime` cho block ẢNH; logic
+// text-extractable giữ nguyên 100%.
 // ─────────────────────────────────────────────────────────────
 export const buildAttachmentsSystemNote = (attachments = []) => {
-  const visible = (attachments || []).filter((a) =>
-    isTextExtractable(a.mime_type, a.file_name),
-  );
-  if (visible.length === 0) return '';
+  const list = attachments || [];
+
+  const textVisible  = list.filter((a) => isTextExtractable(a.mime_type, a.file_name));
+  const imageVisible = list.filter((a) => isInlineImageMime(a.mime_type));
 
   const lines = [];
-  lines.push('═════════ FILE ĐÍNH KÈM ═════════');
-  lines.push('(Khi user hỏi nội dung file, gọi tool `read_attachment` với THAM SỐ');
-  lines.push(' `file_name` = tên file copy nguyên văn từ danh sách dưới đây.)');
-  for (const a of visible) {
-    const sizeKb = a.size_bytes ? `${Math.round(a.size_bytes / 1024)} KB` : '?';
-    const notReady = a.is_downloaded ? '' : ' [chưa tải xong server, không đọc được]';
-    lines.push(`  - "${a.file_name}" (${a.mime_type ?? '?'}, ${sizeKb})${notReady}`);
+
+  if (textVisible.length > 0) {
+    lines.push('═════════ FILE ĐÍNH KÈM ═════════');
+    lines.push('(Khi user hỏi nội dung file, gọi tool `read_attachment` với THAM SỐ');
+    lines.push(' `file_name` = tên file copy nguyên văn từ danh sách dưới đây.)');
+    for (const a of textVisible) {
+      const sizeKb = a.size_bytes ? `${Math.round(a.size_bytes / 1024)} KB` : '?';
+      const notReady = a.is_downloaded ? '' : ' [chưa tải xong server, không đọc được]';
+      lines.push(`  - "${a.file_name}" (${a.mime_type ?? '?'}, ${sizeKb})${notReady}`);
+    }
   }
+
+  if (imageVisible.length > 0) {
+    if (lines.length > 0) lines.push('');
+    lines.push('═════════ ẢNH ĐÍNH KÈM ═════════');
+    lines.push('(Các ảnh dưới đây đã được nhúng TRỰC TIẾP vào cuộc hội thoại — bạn nhìn');
+    lines.push(' thấy chúng ngay trong message tương ứng. TUYỆT ĐỐI KHÔNG gọi');
+    lines.push(' `read_attachment` cho ảnh: tool đó chỉ đọc text, sẽ fail.)');
+    for (const a of imageVisible) {
+      const sizeKb = a.size_bytes ? `${Math.round(a.size_bytes / 1024)} KB` : '?';
+      const notReady = a.is_downloaded ? ' [chưa tải xong server, không hiển thị được]' : '';
+      lines.push(`  - "${a.file_name}" (${a.mime_type ?? '?'}, ${sizeKb})${notReady}`);
+    }
+  }
+
   return lines.join('\n');
 };
 

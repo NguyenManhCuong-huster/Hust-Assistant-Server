@@ -1,5 +1,13 @@
 import { getClient } from '../config/db.js';
 import { extractAttachmentTextByFileNameInIds } from './attachmentTextService.js';
+// MỚI 2026-06: 5 tool tra cứu (email/news/web) cho AI suy luận khi user
+// hỏi chung chung. Declarations + executors tách file riêng để aiTools.js
+// không phình thêm.
+import {
+  SEARCH_TOOL_DECLARATIONS,
+  isSearchToolName,
+  dispatchSearchTool,
+} from './aiSearchTools.js';
 
 // ─────────────────────────────────────────────────────────────
 // Function declarations
@@ -153,18 +161,22 @@ const createWeeklyTasksDeclaration = {
 
 // ─────────────────────────────────────────────────────────────
 // read_attachment — UNIFIED 2026-05-31: dùng file_name + allowedAttachmentIds
+//                — UPDATED 2026-06: ảnh giờ đi inlineData trực tiếp, KHÔNG
+//                  qua tool này nữa.
 // ─────────────────────────────────────────────────────────────
 const readAttachmentDeclaration = {
   name: 'read_attachment',
   description:
-    'Đọc nội dung văn bản của 1 file đính kèm (PDF / Word / Excel / CSV / TXT / HTML) ' +
+    'Đọc nội dung VĂN BẢN của 1 file đính kèm (PDF / Word / Excel / CSV / TXT / HTML) ' +
     'có trong cuộc hội thoại hiện tại — bao gồm file từ email/news context HOẶC ' +
     'file user đã upload trực tiếp vào AI Chat. ' +
     'Server đã extract text trước, KHÔNG upload binary nên rẻ token. ' +
-    'CHỈ gọi khi user thực sự cần thông tin từ FILE (vd "tóm tắt file PDF", ' +
+    'CHỈ gọi khi user thực sự cần thông tin từ FILE TEXT (vd "tóm tắt file PDF", ' +
     '"file Excel có sheet gì", "trong file plan nói gì"). ' +
     'KHÔNG gọi nếu user chỉ hỏi về nội dung email/news — phần đó đã có sẵn trong context. ' +
-    'KHÔNG gọi với file ảnh / video / audio (chưa hỗ trợ extract). ' +
+    'TUYỆT ĐỐI KHÔNG gọi với file ẢNH — ảnh đã được nhúng inline ngay trong message, ' +
+    'bạn nhìn thấy được trực tiếp, không cần tool. Gọi tool với ảnh sẽ luôn fail. ' +
+    'KHÔNG gọi với file video/audio (chưa hỗ trợ). ' +
     'Có thể gọi nhiều lần cho nhiều file khác nhau trong cùng turn. ' +
     'Nếu kết quả có `truncated: true` thì cảnh báo user là file đã bị cắt bớt.',
   parameters: {
@@ -177,18 +189,23 @@ const readAttachmentDeclaration = {
           'bao gồm cả phần mở rộng (.pdf, .xlsx, ...). ' +
           'Vd: "lich_thi.pdf", "report_slides (2).html". ' +
           'TUYỆT ĐỐI không bịa tên hay UUID — chỉ dùng tên đã liệt kê. ' +
-          'Nếu instruction không có file nào → KHÔNG gọi tool này, ' +
-          'trả lời user là không có file đính kèm.',
+          'KHÔNG truyền tên file ảnh từ mục "ẢNH ĐÍNH KÈM" (sai mục tiêu của tool). ' +
+          'Nếu instruction không có file text nào → KHÔNG gọi tool này, ' +
+          'trả lời user là không có file text đính kèm.',
       },
     },
     required: ['file_name'],
   },
 };
 
+// MỚI 2026-06: gộp tool tra cứu (5 tool) cùng với tool task/file.
+// Tên biến giữ `TASK_TOOL_DECLARATIONS` để không phải đổi import ở routes/ai.js
+// — vẫn tương thích ngược.
 export const TASK_TOOL_DECLARATIONS = [
   createTaskDeclaration,
   createWeeklyTasksDeclaration,
   readAttachmentDeclaration,
+  ...SEARCH_TOOL_DECLARATIONS,
 ];
 
 // ─────────────────────────────────────────────────────────────
@@ -199,17 +216,28 @@ export const buildToolSystemNote = ({ tags = [] } = {}) => {
     'Bạn có các tool sau:',
     '  - `create_task`: tạo 1 task đơn lẻ.',
     '  - `create_weekly_tasks`: tạo nhiều task LẶP HẰNG TUẦN.',
-    '  - `read_attachment`: đọc text file đính kèm theo TÊN FILE (chỉ gọi khi user hỏi về file).',
+    '  - `read_attachment`: đọc TEXT file đính kèm theo TÊN FILE (chỉ gọi khi user hỏi về file text).',
+    // MỚI 2026-06 — 5 tool tra cứu để model suy luận khi user hỏi chung chung:
+    '  - `search_emails` + `get_email`: tra email CỦA CHÍNH user. Search trả list',
+    '    tóm tắt, get_email lấy body đầy đủ 1 email cụ thể.',
+    '  - `search_news` + `get_news`: tra tin tức / kế hoạch từ HUST CTT (public).',
+    '  - `web_search`: tra web (search engine ngoài) cho thông tin THỜI SỰ / NGOÀI hệ thống.',
     `Hôm nay là ${new Date().toISOString()} (UTC). Múi giờ user: +07:00 (giờ VN).`,
     '',
     'Khi user yêu cầu "tạo task", "thêm việc", "nhắc tôi"... cho 1 sự kiện đơn → `create_task`.',
     'Khi user yêu cầu task LẶP HẰNG TUẦN → `create_weekly_tasks`.',
     'KHÔNG dùng `create_task` rồi loop tay nhiều lần — tốn token và sai design.',
     '',
+    'QUAN TRỌNG về ẢNH:',
+    '  - Ảnh user gửi được nhúng TRỰC TIẾP vào message — bạn nhìn thấy ảnh ngay trong context.',
+    '  - Có thể mô tả, OCR, phân tích nội dung ảnh mà KHÔNG cần gọi bất kỳ tool nào.',
+    '  - TUYỆT ĐỐI KHÔNG gọi `read_attachment` cho file ảnh — tool đó chỉ đọc text, sẽ fail.',
+    '',
     'QUAN TRỌNG về `read_attachment`:',
     '  - Tham số là TÊN FILE (file_name) — copy NGUYÊN VĂN từ phần "FILE ĐÍNH KÈM".',
     '  - KHÔNG truyền UUID hay id giả định nào.',
-    '  - Nếu phần "FILE ĐÍNH KÈM" không xuất hiện hoặc rỗng → không có file → KHÔNG gọi tool.',
+    '  - KHÔNG truyền tên file từ mục "ẢNH ĐÍNH KÈM" (sai mục tiêu).',
+    '  - Nếu phần "FILE ĐÍNH KÈM" không xuất hiện hoặc rỗng → không có file text → KHÔNG gọi tool.',
     '',
     'QUAN TRỌNG về `create_weekly_tasks`:',
     '  - Server chỉ nhận NGÀY CỤ THỂ: `loop_start_date` và `loop_end_date` (YYYY-MM-DD).',
@@ -217,8 +245,24 @@ export const buildToolSystemNote = ({ tags = [] } = {}) => {
     '  - Convention `day_of_week`: ISO 8601 (1=Thứ 2 ... 7=Chủ Nhật).',
     '  - Trường hợp TKB HUST: nếu user CHƯA cho biết Tuần 1 → HỎI trước, KHÔNG đoán.',
     '',
+    // MỚI 2026-06 — hướng dẫn dùng các tool tra cứu:
+    'QUAN TRỌNG về `search_emails` / `search_news` / `web_search`:',
+    '  - Mục tiêu: cho user hỏi CHUNG CHUNG ("có email gì từ thầy không", "tin học',
+    '    bổng mới"), bạn dùng tool để TRA dữ liệu thực rồi mới trả lời — KHÔNG bịa.',
+    '  - Pattern 2 bước: `search_*` trả list tóm tắt → đọc qua → nếu cần chi tiết 1',
+    '    item cụ thể thì gọi `get_email` / `get_news` với id từ kết quả search.',
+    '  - `search_emails` CHỈ trả email của CHÍNH user — không lo leak email người khác.',
+    '  - `search_news` trả tin PUBLIC từ HUST CTT — mọi user đều xem được.',
+    '  - `web_search` cho câu hỏi NGOÀI hệ thống (định nghĩa, tin thời sự thế giới,',
+    '    kiến thức cập nhật). KHÔNG dùng cho câu hỏi nội bộ HUST.',
+    '  - Câu hỏi mơ hồ ("dạo này có gì mới không") → search với query rỗng để lấy',
+    '    item mới nhất.',
+    '  - KHÔNG bịa email_id / news_id — chỉ dùng id từ kết quả search liền trước đó.',
+    '  - Nếu đang ở context email-chat / news-chat và user chỉ hỏi về CHÍNH email/news',
+    '    đó (đã có trong system instruction) → KHÔNG cần search.',
+    '',
     'Sau khi tool chạy xong, trả lời user bằng tiếng Việt, ngắn gọn.',
-    'TUYỆT ĐỐI không nói "đã tạo/đã đọc" nếu chưa thực sự gọi tool.',
+    'TUYỆT ĐỐI không nói "đã tạo/đã đọc/đã tìm" nếu chưa thực sự gọi tool.',
   ];
 
   if (tags.length > 0) {
@@ -266,7 +310,7 @@ export const buildUserInfoSystemNote = ({ userInfo = null, userEmail = null } = 
 };
 
 // ─────────────────────────────────────────────────────────────
-// Executor factory — UNIFIED 2026-05-31
+// Executor factory — UNIFIED 2026-05-31, mở rộng 2026-06 (search tools).
 // ─────────────────────────────────────────────────────────────
 /**
  * @param {Object}   ctx
@@ -286,6 +330,13 @@ export const makeTaskToolExecutor = ({
   if (!userId) throw new Error('makeTaskToolExecutor: userId là bắt buộc');
 
   return async (toolName, args) => {
+    // MỚI 2026-06: ưu tiên check 5 search tool trước (email/news/web).
+    // dispatcher trả handled=false thì rơi xuống switch task/file cũ.
+    if (isSearchToolName(toolName)) {
+      const r = await dispatchSearchTool(toolName, args, { userId });
+      if (r.handled) return r.result;
+    }
+
     if (toolName === 'create_task') {
       return await execCreateTask({ args, userId, sourceType, sourceId });
     }

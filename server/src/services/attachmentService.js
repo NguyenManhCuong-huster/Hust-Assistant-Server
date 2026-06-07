@@ -7,9 +7,47 @@ import { query } from '../config/db.js';
 const UPLOAD_ROOT = process.env.UPLOAD_ROOT ?? '/app/uploads';
 const MAX_BYTES   = Number.parseInt(process.env.MAX_ATTACHMENT_BYTES, 10) || 25 * 1024 * 1024;
 
+// Giới hạn cho 1 ảnh khi nhúng inline vào request Gemini.
+// Gemini API có hard limit ~20MB cho TOÀN BỘ payload (text + media). Một
+// conversation có thể có nhiều ảnh + thread email dài → đặt cap khá thấp.
+// Override qua ENV `AI_INLINE_IMAGE_MAX_BYTES`.
+const INLINE_IMAGE_MAX_BYTES = Number.parseInt(
+  process.env.AI_INLINE_IMAGE_MAX_BYTES,
+  10,
+) || 7 * 1024 * 1024; // 7 MB
+
 export const OWNER_EMAIL   = 'EMAIL';
 export const OWNER_NEWS    = 'NEWS';
-export const OWNER_AI_CHAT = 'AI_CHAT';                                      // ← MỚI
+export const OWNER_AI_CHAT = 'AI_CHAT';
+
+// ─────────────────────────────────────────────────────────────
+// Image detection — UNIFIED 2026-06.
+//
+// Whitelist các MIME ảnh mà Gemini multimodal hỗ trợ inline.
+// Tham khảo: https://ai.google.dev/gemini-api/docs/vision
+// (Cap cũng phụ thuộc model — Gemini 1.5+ rộng hơn 1.0.)
+//
+// SVG cố tình bỏ qua: là XML/text, Gemini không tự render, và `pdf-parse`/
+// `mammoth`/... cũng không xử lý SVG. Người dùng cần SVG hãy lưu PNG.
+// ─────────────────────────────────────────────────────────────
+const INLINE_IMAGE_MIMES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/jpg',   // non-standard alias, một số mail relay vẫn dùng
+  'image/webp',
+  'image/heic',
+  'image/heif',
+  'image/gif',
+]);
+
+/**
+ * True nếu MIME thuộc danh sách ảnh có thể nhúng inline vào Gemini.
+ * Dùng ở aiService + routes/ai.js để filter rows trước khi đọc bytes.
+ */
+export const isInlineImageMime = (mime) => {
+  if (!mime) return false;
+  return INLINE_IMAGE_MIMES.has(String(mime).toLowerCase().trim());
+};
 
 // ─────────────────────────────────────────────────────────
 // Helpers
@@ -307,7 +345,7 @@ export const getAttachmentForUser = async (attachmentId, userId) => {
 
   if (row.owner_type === OWNER_NEWS) return row;                  // public
 
-  if (row.owner_type === OWNER_AI_CHAT) {                         // ← MỚI
+  if (row.owner_type === OWNER_AI_CHAT) {
     return row.owner_id === userId ? row : null;
   }
 
@@ -400,6 +438,79 @@ export const openReadStream = (storagePath) => {
   return { absPath: abs, stream: createReadStream(abs) };
 };
 
-export const getUploadRoot   = () => UPLOAD_ROOT;
-export const getMaxBytes     = () => MAX_BYTES;
-export const getFileSize     = fileSizeOf;
+// ─────────────────────────────────────────────────────────────
+// MỚI 2026-06: Inline image reader cho AI multimodal.
+//
+// Trả về Map<attachment_id, {mimeType, base64Data, file_name, sizeBytes}>
+// cho NHỮNG ROW LÀ ẢNH HỖ TRỢ. Rows không phải ảnh hoặc thiếu storage_path
+// sẽ bị skip. File quá lớn (> INLINE_IMAGE_MAX_BYTES) cũng bị skip + log
+// cảnh báo — caller có thể quyết định nói gì với user.
+//
+// Path-traversal guard: dùng cùng logic với openReadStream().
+//
+// Input rows là output từ collectEffectiveAttachments (đã validate ownership).
+// Tức là KHÔNG cần check quyền lần nữa — caller đã làm.
+//
+// Lý do tách thành 1 hàm: gọi từ aiService/routes/ai.js mỗi turn chat, muốn
+// 1 chỗ duy nhất kiểm tra MIME + size + đọc disk.
+// ─────────────────────────────────────────────────────────────
+/**
+ * @param {Array<{id, mime_type, storage_path, file_name, size_bytes}>} rows
+ * @returns {Promise<Map<string, {mimeType: string, base64Data: string, file_name: string, sizeBytes: number}>>}
+ */
+export const readInlineImagesByRows = async (rows) => {
+  const out = new Map();
+  if (!Array.isArray(rows) || rows.length === 0) return out;
+
+  const rootResolved = path.resolve(UPLOAD_ROOT);
+
+  // Đọc song song để giảm latency nếu có nhiều ảnh
+  await Promise.all(rows.map(async (row) => {
+    if (!row || !row.id) return;
+    if (!isInlineImageMime(row.mime_type)) return;
+    if (!row.storage_path) return;
+
+    const abs = path.resolve(path.join(UPLOAD_ROOT, row.storage_path));
+    // Path-traversal guard (DB chỉ chứa data từ chính server, nhưng vẫn defense-in-depth)
+    if (!abs.startsWith(rootResolved + path.sep) && abs !== rootResolved) {
+      console.warn(`[inline-image] path traversal blocked: ${row.storage_path}`);
+      return;
+    }
+
+    // Pre-check size (có thể null trong DB → đành đọc rồi check)
+    if (typeof row.size_bytes === 'number' && row.size_bytes > INLINE_IMAGE_MAX_BYTES) {
+      console.warn(
+        `[inline-image] skip "${row.file_name}" (${row.size_bytes} > ${INLINE_IMAGE_MAX_BYTES} bytes cap)`,
+      );
+      return;
+    }
+
+    let buffer;
+    try {
+      buffer = await fs.readFile(abs);
+    } catch (e) {
+      console.warn(`[inline-image] read failed for "${row.file_name}": ${e.message}`);
+      return;
+    }
+    if (buffer.length > INLINE_IMAGE_MAX_BYTES) {
+      console.warn(
+        `[inline-image] skip "${row.file_name}" after-read (${buffer.length} > ${INLINE_IMAGE_MAX_BYTES} bytes cap)`,
+      );
+      return;
+    }
+
+    out.set(row.id, {
+      mimeType:   String(row.mime_type).toLowerCase().trim(),
+      base64Data: buffer.toString('base64'),
+      file_name:  row.file_name,
+      sizeBytes:  buffer.length,
+    });
+  }));
+
+  return out;
+};
+
+export const getUploadRoot       = () => UPLOAD_ROOT;
+export const getMaxBytes         = () => MAX_BYTES;
+export const getInlineImageMaxBytes = () => INLINE_IMAGE_MAX_BYTES;
+export const getFileSize         = fileSizeOf;
