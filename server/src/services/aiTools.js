@@ -78,7 +78,8 @@ const createWeeklyTasksDeclaration = {
     '\n\n' +
     'AI PHẢI tự tính `loop_start_date` và `loop_end_date` thành ngày cụ thể (YYYY-MM-DD) ' +
     'trước khi gọi tool — server KHÔNG hiểu mô tả tương đối. ' +
-    'Dùng ngày hôm nay (đã có ở system note) làm mốc. ' +
+    'Không được đoán bừa, nếu người dùng không nói rõ, không chắc chắn thì phải hỏi lại các thông tin cần thiết. ' +
+    'Có thể dùng ngày hôm nay (đã có ở system note) để hỗ trợ tính toán. ' +
     'Ví dụ: "gym mỗi Thứ 3 trong 1 tháng tới" → loop_start_date = hôm nay, loop_end_date = hôm nay + 30 ngày. ' +
     'Ví dụ TKB HUST: user paste "Thứ 4, tuần 25-32" + nói "Tuần 1 bắt đầu 02/09/2024" → ' +
     'AI tự tính loop_start_date = 02/09/2024 + 24*7 = 2025-02-17, ' +

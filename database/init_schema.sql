@@ -91,6 +91,15 @@ VALUES (
 )
 ON CONFLICT (name) DO NOTHING;
 
+-- Seed nguồn HUST SOICT
+INSERT INTO "news_sources" (name, description, home_url)
+VALUES (
+  'HUST SOICT',
+  'Trường Công nghệ Thông tin và Truyền thông - Đại học Bách khoa Hà Nội',
+  'https://soict.hust.edu.vn/'
+)
+ON CONFLICT (name) DO NOTHING;
+
 -- ═════════════════════════════════════════════════════════════ NEWS RECOMMENDATIONS
 -- Cache kết quả đề xuất news cho từng user, recompute lazy (TTL 6h).
 -- Invalidate (xoá rows) khi user update user_info → next request sẽ recompute.
