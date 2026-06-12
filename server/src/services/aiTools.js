@@ -8,6 +8,7 @@ import {
   isSearchToolName,
   dispatchSearchTool,
 } from './aiSearchTools.js';
+import { buildReferenceSystemNote } from './aiReferences.js';
 
 // ─────────────────────────────────────────────────────────────
 // Function declarations
@@ -264,6 +265,8 @@ export const buildToolSystemNote = ({ tags = [] } = {}) => {
     '',
     'Sau khi tool chạy xong, trả lời user bằng tiếng Việt, ngắn gọn.',
     'TUYỆT ĐỐI không nói "đã tạo/đã đọc/đã tìm" nếu chưa thực sự gọi tool.',
+    '',
+    buildReferenceSystemNote(),
   ];
 
   if (tags.length > 0) {

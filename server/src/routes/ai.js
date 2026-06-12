@@ -16,6 +16,7 @@ import {
 } from '../services/aiTools.js';
 import * as att from '../services/attachmentService.js';
 import { isTextExtractable } from '../services/attachmentTextService.js';
+import { resolveReferences } from '../services/aiReferences.js';
 
 const router = express.Router();
 router.use(requireAuth);
@@ -328,13 +329,19 @@ router.post('/chat', async (req, res, next) => {
       inlineDataMap,
     });
 
+    const { reply: replyWithRefs, references } = await resolveReferences({
+      reply:  result.reply,
+      userId: req.user.id,
+    });
+
     res.json({
       success: true,
       data: {
-        reply:                  result.reply,
+        reply:                  replyWithRefs,
         usage:                  result.usage,
         tool_calls:             result.toolCalls,
         effective_attachments:  serializeAttachments(effective.attachmentList),
+        references,
       },
     });
   } catch (err) {
@@ -453,14 +460,20 @@ router.post('/email-chat', async (req, res, next) => {
       inlineDataMap,
     });
 
+    const { reply: replyWithRefs, references } = await resolveReferences({
+      reply:  result.reply,
+      userId: req.user.id,
+    });
+
     res.json({
       success: true,
       data: {
-        reply:                 result.reply,
+        reply:                 replyWithRefs,
         thread_message_count:  thread.messages.length,
         usage:                 result.usage,
         tool_calls:            result.toolCalls,
         effective_attachments: serializeAttachments(effective.attachmentList),
+        references,
       },
     });
   } catch (err) {
@@ -537,13 +550,19 @@ router.post('/news-chat', async (req, res, next) => {
       inlineDataMap,
     });
 
+    const { reply: replyWithRefs, references } = await resolveReferences({
+      reply:  result.reply,
+      userId: req.user.id,
+    });
+
     res.json({
       success: true,
       data: {
-        reply:                 result.reply,
+        reply:                 replyWithRefs,
         usage:                 result.usage,
         tool_calls:            result.toolCalls,
         effective_attachments: serializeAttachments(effective.attachmentList),
+        references,
       },
     });
   } catch (err) {
