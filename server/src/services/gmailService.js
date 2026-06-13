@@ -1,5 +1,5 @@
 import { query }            from '../config/db.js';
-import { encrypt, decrypt } from '../config/crypto.js';
+import { encrypt } from '../config/crypto.js';
 
 const GMAIL_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 
@@ -34,11 +34,18 @@ const gmailFetch = async (accessToken, path, params = {}) => {
     err.code  = 'TOKEN_EXPIRED';
     throw err;
   }
+  if (res.status === 204) return {};
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Gmail API error ${res.status}: ${body}`);
   }
-  return res.json();
+  const text = await res.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Gmail API returned invalid JSON (path: ${path}): ${text.slice(0, 200)}`);
+  }
 };
 
 const headerOf = (msg, name) => {

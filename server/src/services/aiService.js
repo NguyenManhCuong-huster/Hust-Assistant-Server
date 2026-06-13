@@ -82,7 +82,7 @@ export const chat = async ({
   for (let iter = 0; iter < maxIterations; iter++) {
     const body = {
       contents,
-      generationConfig: { temperature, maxOutputTokens: 2048 },
+      generationConfig: { temperature, maxOutputTokens: 8192 },
     };
     if (systemInstruction) {
       body.systemInstruction = { parts: [{ text: systemInstruction }] };

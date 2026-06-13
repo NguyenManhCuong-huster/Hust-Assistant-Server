@@ -19,9 +19,10 @@ const createTaskDeclaration = {
     'Tạo một task mới (việc cần làm / lịch học / lịch thi) cho người dùng đang chat. ' +
     'Chỉ gọi khi user thực sự yêu cầu lưu/tạo/thêm task hoặc nhắc nhở. ' +
     'KHÔNG gọi khi user chỉ hỏi thông tin hoặc tóm tắt. ' +
-    'Nếu user nói thời gian dạng tương đối ("ngày mai 9h", "thứ 6 tuần sau"), ' +
+    'Nếu user nói thời gian dạng tương đối (Ví dụ: "ngày mai 9h", "thứ 6 tuần sau"), ' +
     'hãy convert thành ISO 8601 với timezone +07:00 dựa trên thời điểm hiện tại. ' +
-    'Nếu thiếu thông tin về thời gian thì cứ bỏ qua start_time/end_time, không tự bịa. ' +
+    'Nếu thiếu thông tin về thời gian thì hỏi lại người dùng' +
+    'Nếu đã hỏi mà người dùng vẫn muốn tạo thì cứ bỏ qua start_time/end_time, không tự bịa. ' +
     'Với task LẶP HẰNG TUẦN (TKB, gym mỗi T3, uống thuốc mỗi sáng...), ' +
     'KHÔNG dùng tool này — dùng `create_weekly_tasks`.',
   parameters: {
@@ -81,6 +82,7 @@ const createWeeklyTasksDeclaration = {
     'trước khi gọi tool — server KHÔNG hiểu mô tả tương đối. ' +
     'Không được đoán bừa, nếu người dùng không nói rõ, không chắc chắn thì phải hỏi lại các thông tin cần thiết. ' +
     'Có thể dùng ngày hôm nay (đã có ở system note) để hỗ trợ tính toán. ' +
+    'Đây là các ví dụ hướng dẫn, không phải thực tế' +
     'Ví dụ: "gym mỗi Thứ 3 trong 1 tháng tới" → loop_start_date = hôm nay, loop_end_date = hôm nay + 30 ngày. ' +
     'Ví dụ TKB HUST: user paste "Thứ 4, tuần 25-32" + nói "Tuần 1 bắt đầu 02/09/2024" → ' +
     'AI tự tính loop_start_date = 02/09/2024 + 24*7 = 2025-02-17, ' +
@@ -200,12 +202,97 @@ const readAttachmentDeclaration = {
   },
 };
 
+// ─────────────────────────────────────────────────────────────
+// MỚI 2026-06: 2 tool ghi KẾT QUẢ HỌC TẬP (điểm từng học phần).
+// AI CHỈ được set 6 trường: semester, course_code, course_name,
+// course_name_en, credits, letter_grade. Các trường khác (id, user_id,
+// mod_time, is_deleted) do server tự quản. Ghi theo upsert: trùng
+// (học kỳ + mã HP) thì CẬP NHẬT thay vì tạo bản trùng.
+// ─────────────────────────────────────────────────────────────
+const gradeItemProperties = {
+  semester: {
+    type:        'string',
+    description:
+      'Mã học kỳ HUST dạng "<năm><kỳ>", ví dụ "20251" = năm học 2025-2026 kỳ 1, ' +
+      '"20242" = năm 2024-2025 kỳ 2, "20253" = kỳ hè. Bắt buộc.',
+  },
+  course_code: {
+    type:        'string',
+    description: 'Mã học phần, ví dụ "IT4785", "PE2501". Bắt buộc. Sẽ được viết HOA.',
+  },
+  course_name: {
+    type:        'string',
+    description: 'Tên học phần tiếng Việt, ví dụ "Phát triển ứng dụng cho thiết bị di động". Bắt buộc.',
+  },
+  course_name_en: {
+    type:        'string',
+    description: 'Tên học phần tiếng Anh, ví dụ "Mobile Programming". Không bắt buộc — bỏ qua nếu không có.',
+  },
+  credits: {
+    type:        'integer',
+    description:
+      'Số tín chỉ (TC), số nguyên 0..30. Ví dụ 2, 3. Học phần điều kiện/GDTC có thể 0 TC. ' +
+      'Bỏ qua thì mặc định 0. Chỉ học phần có TC > 0 mới được tính vào GPA/CPA.',
+  },
+  letter_grade: {
+    type:        'string',
+    enum:        ['A+', 'A', 'B+', 'B', 'C+', 'C', 'D+', 'D', 'F'],
+    description:
+      'Điểm chữ theo thang HUST. Bỏ qua (hoặc để trống) nếu học phần CHƯA có điểm. ' +
+      'Giá trị ngoài danh sách sẽ bị coi như chưa có điểm.',
+  },
+};
+
+const createGradeDeclaration = {
+  name: 'create_grade',
+  description:
+    'Ghi KẾT QUẢ HỌC TẬP của MỘT học phần cho người dùng đang chat. ' +
+    'Chỉ gọi khi user thực sự yêu cầu lưu/nhập/thêm điểm của 1 môn. ' +
+    'Nếu user đưa BẢNG ĐIỂM nhiều môn (paste danh sách, ảnh bảng điểm...) → KHÔNG gọi tool này ' +
+    'nhiều lần, hãy dùng `create_grades` (1 lần, mảng nhiều môn). ' +
+    'Server ghi theo upsert: nếu đã có điểm cùng (học kỳ + mã HP) thì CẬP NHẬT, ' +
+    'không tạo bản trùng. KHÔNG tự bịa mã HP, tên môn, số TC hay điểm — thiếu thì hỏi lại user.',
+  parameters: {
+    type:       'object',
+    properties: gradeItemProperties,
+    required:   ['semester', 'course_code', 'course_name'],
+  },
+};
+
+const createGradesDeclaration = {
+  name: 'create_grades',
+  description:
+    'Ghi KẾT QUẢ HỌC TẬP của NHIỀU học phần trong MỘT lần gọi (ghi cả bảng điểm). ' +
+    'Dùng khi user paste danh sách điểm, gửi ảnh/bảng điểm, hoặc liệt kê nhiều môn cùng lúc. ' +
+    'Mỗi phần tử trong `grades` là 1 học phần với đúng 6 trường cho phép. ' +
+    'Các môn có thể thuộc nhiều học kỳ khác nhau (mỗi phần tử tự khai `semester` riêng). ' +
+    'Server ghi theo upsert từng môn theo (học kỳ + mã HP). ' +
+    'KHÔNG tự bịa dữ liệu; chỉ ghi những gì user cung cấp.',
+  parameters: {
+    type:       'object',
+    properties: {
+      grades: {
+        type:        'array',
+        description: 'Danh sách học phần cần ghi điểm (≥ 1 phần tử).',
+        items: {
+          type:       'object',
+          properties: gradeItemProperties,
+          required:   ['semester', 'course_code', 'course_name'],
+        },
+      },
+    },
+    required: ['grades'],
+  },
+};
+
 // MỚI 2026-06: gộp tool tra cứu (5 tool) cùng với tool task/file.
 // Tên biến giữ `TASK_TOOL_DECLARATIONS` để không phải đổi import ở routes/ai.js
 // — vẫn tương thích ngược.
 export const TASK_TOOL_DECLARATIONS = [
   createTaskDeclaration,
   createWeeklyTasksDeclaration,
+  createGradeDeclaration,
+  createGradesDeclaration,
   readAttachmentDeclaration,
   ...SEARCH_TOOL_DECLARATIONS,
 ];
@@ -218,6 +305,8 @@ export const buildToolSystemNote = ({ tags = [] } = {}) => {
     'Bạn có các tool sau:',
     '  - `create_task`: tạo 1 task đơn lẻ.',
     '  - `create_weekly_tasks`: tạo nhiều task LẶP HẰNG TUẦN.',
+    '  - `create_grade`: ghi điểm 1 học phần (kết quả học tập).',
+    '  - `create_grades`: ghi điểm NHIỀU học phần trong 1 lần (cả bảng điểm).',
     '  - `read_attachment`: đọc TEXT file đính kèm theo TÊN FILE (chỉ gọi khi user hỏi về file text).',
     // MỚI 2026-06 — 5 tool tra cứu để model suy luận khi user hỏi chung chung:
     '  - `search_emails` + `get_email`: tra email CỦA CHÍNH user. Search trả list',
@@ -247,6 +336,16 @@ export const buildToolSystemNote = ({ tags = [] } = {}) => {
     '  - Convention `day_of_week`: ISO 8601 (1=Thứ 2 ... 7=Chủ Nhật).',
     '  - Trường hợp TKB HUST: nếu user CHƯA cho biết Tuần 1 → HỎI trước, KHÔNG đoán.',
     '',
+    'QUAN TRỌNG về `create_grade` / `create_grades` (kết quả học tập):',
+    '  - 1 môn → `create_grade`. NHIỀU môn (bảng điểm, paste danh sách, ảnh bảng điểm)',
+    '    → `create_grades` GỌI 1 LẦN với mảng `grades`. KHÔNG loop `create_grade` nhiều lần.',
+    '  - Mỗi môn chỉ gồm 6 trường: semester, course_code, course_name, course_name_en,',
+    '    credits, letter_grade. KHÔNG truyền id/user_id — server tự gán.',
+    '  - `semester` là mã kỳ HUST "<năm><kỳ>" (vd "20251"). `letter_grade` thuộc',
+    '    {A+,A,B+,B,C+,C,D+,D,F}; môn chưa có điểm thì bỏ trống.',
+    '  - Server tự upsert theo (học kỳ + mã HP): trùng thì cập nhật, không tạo bản trùng.',
+    '  - TUYỆT ĐỐI không bịa mã HP / số TC / điểm. Thiếu thông tin thì hỏi lại user.',
+    '',
     // MỚI 2026-06 — hướng dẫn dùng các tool tra cứu:
     'QUAN TRỌNG về `search_emails` / `search_news` / `web_search`:',
     '  - Mục tiêu: cho user hỏi CHUNG CHUNG ("có email gì từ thầy không", "tin học',
@@ -264,6 +363,9 @@ export const buildToolSystemNote = ({ tags = [] } = {}) => {
     '    đó (đã có trong system instruction) → KHÔNG cần search.',
     '',
     'Sau khi tool chạy xong, trả lời user bằng tiếng Việt, ngắn gọn.',
+    'Nếu nội dung trả về từ tool DÀI (email body, file text, kết quả search nhiều item...) →',
+    '  TÓM TẮT ý chính trước, KHÔNG dump nguyên văn toàn bộ nội dung vào câu trả lời.',
+    '  Chỉ trích dẫn đoạn cụ thể khi user hỏi rõ hoặc cần dẫn chứng.',
     'TUYỆT ĐỐI không nói "đã tạo/đã đọc/đã tìm" nếu chưa thực sự gọi tool.',
     '',
     buildReferenceSystemNote(),
@@ -346,6 +448,12 @@ export const makeTaskToolExecutor = ({
     }
     if (toolName === 'create_weekly_tasks') {
       return await execCreateWeeklyTasks({ args, userId, sourceType, sourceId });
+    }
+    if (toolName === 'create_grade') {
+      return await execCreateGrade({ args, userId });
+    }
+    if (toolName === 'create_grades') {
+      return await execCreateGrades({ args, userId });
     }
     if (toolName === 'read_attachment') {
       const fileName = (args?.file_name ?? '').toString().trim();
@@ -631,6 +739,143 @@ const execCreateWeeklyTasks = async ({ args, userId, sourceType, sourceId }) => 
         tags:             attachedTags,
       },
       task_ids: taskRows.map((r) => r.id),
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    return { success: false, error: err.message ?? String(err) };
+  } finally {
+    client.release();
+  }
+};
+
+// Thang điểm chữ hợp lệ (HUST). NULL = chưa có điểm.
+const GRADE_VALID_LETTERS = ['A+', 'A', 'B+', 'B', 'C+', 'C', 'D+', 'D', 'F'];
+
+const normalizeGradeLetter = (v) => {
+  if (v === undefined || v === null || v === '') return null;
+  const up = String(v).trim().toUpperCase();
+  return GRADE_VALID_LETTERS.includes(up) ? up : null;
+};
+
+const normalizeGradeCredits = (v) => {
+  if (v === undefined || v === null || v === '') return 0;
+  const n = Number.parseInt(v, 10);
+  if (!Number.isInteger(n) || n < 0 || n > 30) {
+    const err = new Error('credits phải là số nguyên 0..30.');
+    err.statusCode = 400;
+    throw err;
+  }
+  return n;
+};
+
+// Chuẩn hoá + validate 1 học phần từ args của model. Trả { ok, value, error }.
+const normalizeGradeItem = (raw) => {
+  const semester   = (raw?.semester ?? '').toString().trim();
+  const courseCode = (raw?.course_code ?? '').toString().trim().toUpperCase();
+  const courseName = (raw?.course_name ?? '').toString().trim();
+  if (!semester)   return { ok: false, error: 'Thiếu semester.' };
+  if (!courseCode) return { ok: false, error: 'Thiếu course_code.' };
+  if (!courseName) return { ok: false, error: 'Thiếu course_name.' };
+
+  const courseNameEn = raw?.course_name_en ? String(raw.course_name_en).trim() : null;
+  let credits;
+  try {
+    credits = normalizeGradeCredits(raw?.credits);
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+  const letter = normalizeGradeLetter(raw?.letter_grade);
+
+  return {
+    ok:    true,
+    value: { semester, courseCode, courseName, courseNameEn, credits, letter },
+  };
+};
+
+// Upsert 1 record theo (user_id, semester, course_code) trên bản CHƯA xoá.
+// `client` là pg client đang trong transaction (create_grades) hoặc lấy từ pool (create_grade).
+const upsertGradeRow = async (client, userId, g) => {
+  const found = await client.query(
+    `SELECT id FROM grades
+      WHERE user_id = $1 AND semester = $2 AND course_code = $3 AND is_deleted = FALSE
+      LIMIT 1`,
+    [userId, g.semester, g.courseCode],
+  );
+
+  if (found.rows[0]) {
+    const r = await client.query(
+      `UPDATE grades SET
+         course_name = $1, course_name_en = $2, credits = $3, letter_grade = $4,
+         is_deleted = FALSE, mod_time = CURRENT_TIMESTAMP
+       WHERE id = $5
+       RETURNING id, semester, course_code, course_name, course_name_en, credits, letter_grade`,
+      [g.courseName, g.courseNameEn, g.credits, g.letter, found.rows[0].id],
+    );
+    return { action: 'updated', row: r.rows[0] };
+  }
+
+  const r = await client.query(
+    `INSERT INTO grades
+       (user_id, semester, course_code, course_name, course_name_en, credits, letter_grade)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING id, semester, course_code, course_name, course_name_en, credits, letter_grade`,
+    [userId, g.semester, g.courseCode, g.courseName, g.courseNameEn, g.credits, g.letter],
+  );
+  return { action: 'created', row: r.rows[0] };
+};
+
+const execCreateGrade = async ({ args, userId }) => {
+  const norm = normalizeGradeItem(args);
+  if (!norm.ok) return { success: false, error: norm.error };
+
+  const client = await getClient();
+  try {
+    const { action, row } = await upsertGradeRow(client, userId, norm.value);
+    return { success: true, action, grade: row }; // action: 'created' | 'updated'
+  } catch (err) {
+    return { success: false, error: err.message ?? String(err) };
+  } finally {
+    client.release();
+  }
+};
+
+const execCreateGrades = async ({ args, userId }) => {
+  const list = Array.isArray(args?.grades) ? args.grades : null;
+  if (!list || list.length === 0) {
+    return { success: false, error: 'Thiếu mảng `grades` (cần ít nhất 1 học phần).' };
+  }
+
+  // Validate trước để báo rõ phần tử nào sai, không chặn cả batch vì 1 môn lỗi.
+  const normalized = [];
+  const invalid = [];
+  list.forEach((raw, i) => {
+    const n = normalizeGradeItem(raw);
+    if (n.ok) normalized.push(n.value);
+    else invalid.push({ index: i, course_code: raw?.course_code ?? null, error: n.error });
+  });
+
+  if (normalized.length === 0) {
+    return { success: false, error: 'Không có học phần hợp lệ nào.', invalid };
+  }
+
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    const saved = [];
+    let created = 0;
+    let updated = 0;
+    for (const g of normalized) {
+      const { action, row } = await upsertGradeRow(client, userId, g);
+      if (action === 'created') created += 1; else updated += 1;
+      saved.push({ action, ...row });
+    }
+    await client.query('COMMIT');
+    return {
+      success:       true,
+      created_count: created,
+      updated_count: updated,
+      skipped:       invalid, // các phần tử không hợp lệ bị bỏ qua (nếu có)
+      grades:        saved,
     };
   } catch (err) {
     await client.query('ROLLBACK');

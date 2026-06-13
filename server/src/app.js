@@ -8,12 +8,13 @@ import authRoutes             from './routes/auth.js';
 import accountRoutes          from './routes/accounts.js';
 import taskRoutes             from './routes/tasks.js';
 import tagRoutes              from './routes/tags.js';
+import gradeRoutes            from './routes/grades.js';                       // ← MỚI (kết quả học tập)
 import syncRoutes             from './routes/sync.js';
 import userInfoRoutes         from './routes/userInfo.js';
 import emailRoutes            from './routes/emails.js';
 import aiRoutes               from './routes/ai.js';
 import newsRoutes             from './routes/news.js';
-import attachmentRoutes       from './routes/attachments.js';                  // ← MỚI
+import attachmentRoutes       from './routes/attachments.js';
 import { startPolling }       from './services/emailSyncService.js';
 import { startNewsScheduler } from './services/newsScrapeScheduler.js';
 
@@ -43,12 +44,13 @@ app.use('/api/auth',        authRoutes);
 app.use('/api/accounts',    accountRoutes);
 app.use('/api/tasks',       taskRoutes);
 app.use('/api/tags',        tagRoutes);
+app.use('/api/grades',      gradeRoutes);                                      // ← MỚI
 app.use('/api/sync',        syncRoutes);
 app.use('/api/user-info',   userInfoRoutes);
 app.use('/api/emails',      emailRoutes);
 app.use('/api/ai',          aiRoutes);
 app.use('/api/news',        newsRoutes);
-app.use('/api/attachments', attachmentRoutes);                                 // ← MỚI
+app.use('/api/attachments', attachmentRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({

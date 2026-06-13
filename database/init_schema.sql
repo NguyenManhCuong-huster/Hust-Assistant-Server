@@ -259,6 +259,32 @@ CREATE TABLE "task_tag_cross_ref" (
 );
 CREATE INDEX idx_ttcr_tag_id ON "task_tag_cross_ref"(tag_id);
 
+-- ═════════════════════════════════════════════════════════════ GRADES (KẾT QUẢ HỌC TẬP)
+-- Lưu điểm từng học phần của sinh viên. Mô hình giống tasks/tags:
+-- UUID PK, mod_time (TIMESTAMPTZ), soft-delete is_deleted.
+-- Đồng bộ Last-Write-Wins do client xử lý ở repository (so sánh mod_time khi pull),
+-- giống hệt cơ chế của tags.
+--
+-- KHÔNG đặt UNIQUE(user_id, semester, course_code): client tạo offline rồi push (POST)
+-- sẽ được server cấp id mới; nếu vướng unique server trả 409 → record local kẹt dirty,
+-- retry vô hạn. Thay vào đó client tự chặn trùng mã HP trong cùng học kỳ ở UI.
+-- (Cùng triết lý offline-first đang dùng cho tags.)
+CREATE TABLE "grades" (
+  id             UUID         PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id        UUID         REFERENCES "users"(id) ON DELETE CASCADE,
+  semester       VARCHAR(10)  NOT NULL,                       -- "20251" (năm + kỳ)
+  course_code    VARCHAR(20)  NOT NULL,                       -- "IT4785"
+  course_name    TEXT         NOT NULL,                       -- "Phát triển ứng dụng cho TBDĐ"
+  course_name_en TEXT,                                        -- "Mobile Programming" (nullable)
+  credits        SMALLINT     NOT NULL DEFAULT 0 CHECK (credits BETWEEN 0 AND 30),
+  letter_grade   VARCHAR(2),                                  -- "B+", "C", NULL = chưa có điểm
+  mod_time       TIMESTAMPTZ  DEFAULT CURRENT_TIMESTAMP,
+  is_deleted     BOOLEAN      DEFAULT FALSE
+);
+CREATE INDEX idx_grades_user_id  ON "grades"(user_id);
+CREATE INDEX idx_grades_semester ON "grades"(user_id, semester);
+CREATE INDEX idx_grades_mod_time ON "grades"(mod_time);
+
 -- ═════════════════════════════════════════════════════════════ DATA REPAIR
 -- Idempotent: reset cờ `is_inline=TRUE` sai trên DB tồn tại từ phiên bản trước
 -- (do gmailService.partDisposition() cũ coi Content-ID là dấu hiệu inline).
