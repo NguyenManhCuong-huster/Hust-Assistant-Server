@@ -82,9 +82,9 @@ const createWeeklyTasksDeclaration = {
     'trước khi gọi tool — server KHÔNG hiểu mô tả tương đối. ' +
     'Không được đoán bừa, nếu người dùng không nói rõ, không chắc chắn thì phải hỏi lại các thông tin cần thiết. ' +
     'Có thể dùng ngày hôm nay (đã có ở system note) để hỗ trợ tính toán. ' +
-    'Đây là các ví dụ hướng dẫn, không phải thực tế' +
+    'TIẾP THEO LÀ VÍ DỤ HƯỚNG DẪN, KHÔNG PHẢI THỰC TẾ, TUYỆT ĐỐI KHÔNG DÙNG SỐ LIỆU ĐƯỢC ĐỀ CẬP ĐỂ TÍNH' +
     'Ví dụ: "gym mỗi Thứ 3 trong 1 tháng tới" → loop_start_date = hôm nay, loop_end_date = hôm nay + 30 ngày. ' +
-    'Ví dụ TKB HUST: user paste "Thứ 4, tuần 25-32" + nói "Tuần 1 bắt đầu 02/09/2024" → ' +
+    'Ví dụ TKB HUST: user paste "Thứ 4, tuần 25-32" + nói "Tuần 1 bắt đầu 02/09/2024(ĐÂY LÀ VÍ DỤ, KHÔNG PHẢI NGÀY THẬT)" → ' +
     'AI tự tính loop_start_date = 02/09/2024 + 24*7 = 2025-02-17, ' +
     'loop_end_date = loop_start_date + (32-25)*7 + 6 = 2025-04-13.' +
     '\n\n' +
