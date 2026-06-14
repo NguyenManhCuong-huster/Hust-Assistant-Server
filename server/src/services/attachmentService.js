@@ -510,7 +510,21 @@ export const readInlineImagesByRows = async (rows) => {
   return out;
 };
 
-export const getUploadRoot       = () => UPLOAD_ROOT;
-export const getMaxBytes         = () => MAX_BYTES;
+/**
+ * Convenience helper: fetch attachments for a list of rows and assign to row.attachments.
+ * Mutates the rows array in-place and returns it.
+ */
+export const attachToRows = async (ownerType, rows) => {
+  if (!rows?.length) return rows;
+  const ids = rows.map((r) => r.id);
+  const map = await listForOwnersBulk(ownerType, ids);
+  for (const row of rows) {
+    row.attachments = map.get(row.id) ?? [];
+  }
+  return rows;
+};
+
+export const getUploadRoot          = () => UPLOAD_ROOT;
+export const getMaxBytes            = () => MAX_BYTES;
 export const getInlineImageMaxBytes = () => INLINE_IMAGE_MAX_BYTES;
-export const getFileSize         = fileSizeOf;
+export const getFileSize            = fileSizeOf;

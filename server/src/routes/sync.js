@@ -1,7 +1,9 @@
 import express from 'express';
 
-import { requireAuth }      from '../middleware/authMiddleware.js';
-import { query, getClient } from '../config/db.js';
+import { requireAuth }                from '../middleware/authMiddleware.js';
+import { query }                      from '../config/db.js';
+import { TASK_COLUMNS }               from '../services/taskService.js';
+import { sanitizePriority, sanitizeLat, sanitizeLng } from '../utils/validators.js';
 
 const router = express.Router();
 router.use(requireAuth);
@@ -9,123 +11,101 @@ router.use(requireAuth);
 // ─────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────
-const TASK_COLUMNS = `
-  t.id, t.title, t.description, t.start_time, t.end_time,
-  t.task_type, t.is_completed, t.source_type, t.source_id,
-  t.priority, t.latitude, t.longitude, t.address_name,
-  t.is_deleted, t.mod_time
-`;
 
-const getItem = async (c, t, id, uid) => {
-  const r = await c.query(`SELECT * FROM ${t} WHERE id=$1 AND user_id=$2`, [id, uid]);
+const getItem = async (table, id, userId) => {
+  const r = await query(`SELECT * FROM ${table} WHERE id=$1 AND user_id=$2`, [id, userId]);
   return r.rows[0] ?? null;
 };
 
-const softDelete = async (c, t, id) => {
-  const r = await c.query(
-    `UPDATE ${t} SET is_deleted=TRUE, mod_time=CURRENT_TIMESTAMP
+const softDelete = async (table, id) => {
+  const r = await query(
+    `UPDATE ${table} SET is_deleted=TRUE, mod_time=CURRENT_TIMESTAMP
      WHERE id=$1 RETURNING id, is_deleted, mod_time`,
     [id],
   );
   return r.rows[0];
 };
 
-// Sanitize helpers — trả về null nếu không hợp lệ thay vì throw
-// (sync batch: 1 record lỗi không nên fail cả batch).
-const sanitizePriority = (v) => {
-  if (v === undefined || v === null || v === '') return null;
-  const n = Number.parseInt(v, 10);
-  return Number.isInteger(n) && n >= 1 && n <= 4 ? n : null;
-};
-const sanitizeLat = (v) => {
-  if (v === undefined || v === null || v === '') return null;
-  const n = Number(v);
-  return Number.isFinite(n) && n >= -90 && n <= 90 ? n : null;
-};
-const sanitizeLng = (v) => {
-  if (v === undefined || v === null || v === '') return null;
-  const n = Number(v);
-  return Number.isFinite(n) && n >= -180 && n <= 180 ? n : null;
+const createTaskRow = async (userId, data) => {
+  const {
+    title,
+    description  = null,
+    start_time   = null,
+    end_time     = null,
+    task_type    = 'TODO',
+    source_type  = 'MANUAL',
+    source_id    = null,
+    address_name = null,
+  } = data;
+  const r = await query(
+    `INSERT INTO tasks
+       (user_id, title, description, start_time, end_time, task_type,
+        source_type, source_id, priority, latitude, longitude, address_name)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, 2), $10, $11, $12)
+     RETURNING *`,
+    [
+      userId, title, description, start_time, end_time,
+      task_type?.toUpperCase()   ?? 'TODO',
+      source_type?.toUpperCase() ?? 'MANUAL',
+      source_id,
+      sanitizePriority(data.priority),
+      sanitizeLat(data.latitude),
+      sanitizeLng(data.longitude),
+      address_name,
+    ],
+  );
+  return r.rows[0];
 };
 
-const createItem = async (client, table, userId, data) => {
-  if (table === 'tasks') {
-    const {
-      title,
-      description  = null,
-      start_time   = null,
-      end_time     = null,
-      task_type    = 'TODO',
-      source_type  = 'MANUAL',
-      source_id    = null,
-      address_name = null,
-    } = data;
-    const r = await client.query(
-      `INSERT INTO tasks
-         (user_id, title, description, start_time, end_time, task_type,
-          source_type, source_id, priority, latitude, longitude, address_name)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, 2), $10, $11, $12)
-       RETURNING *`,
-      [
-        userId, title, description, start_time, end_time,
-        task_type?.toUpperCase()   ?? 'TODO',
-        source_type?.toUpperCase() ?? 'MANUAL',
-        source_id,
-        sanitizePriority(data.priority),
-        sanitizeLat(data.latitude),
-        sanitizeLng(data.longitude),
-        address_name,
-      ],
-    );
-    return r.rows[0];
-  }
+const updateTaskRow = async (userId, data) => {
+  const {
+    id,
+    title,
+    description  = null,
+    start_time   = null,
+    end_time     = null,
+    task_type    = 'TODO',
+    is_completed = false,
+    source_type  = 'MANUAL',
+    source_id    = null,
+    address_name = null,
+  } = data;
+  const r = await query(
+    `UPDATE tasks SET
+       title=$1, description=$2, start_time=$3, end_time=$4, task_type=$5,
+       is_completed=$6, source_type=$7, source_id=$8,
+       priority=COALESCE($9, priority),
+       latitude=$10, longitude=$11, address_name=$12,
+       is_deleted=FALSE, mod_time=CURRENT_TIMESTAMP
+     WHERE id=$13 AND user_id=$14 RETURNING *`,
+    [
+      title, description, start_time, end_time,
+      task_type?.toUpperCase()   ?? 'TODO',
+      is_completed,
+      source_type?.toUpperCase() ?? 'MANUAL',
+      source_id,
+      sanitizePriority(data.priority),
+      sanitizeLat(data.latitude),
+      sanitizeLng(data.longitude),
+      address_name,
+      id, userId,
+    ],
+  );
+  return r.rows[0];
+};
+
+const createTagRow = async (userId, data) => {
   const { name, color_hex = null } = data;
-  const r = await client.query(
+  const r = await query(
     'INSERT INTO tags (user_id, name, color_hex) VALUES ($1, $2, $3) RETURNING *',
     [userId, name, color_hex],
   );
   return r.rows[0];
 };
 
-const updateItem = async (client, table, userId, data) => {
-  if (table === 'tasks') {
-    const {
-      id,
-      title,
-      description  = null,
-      start_time   = null,
-      end_time     = null,
-      task_type    = 'TODO',
-      is_completed = false,
-      source_type  = 'MANUAL',
-      source_id    = null,
-      address_name = null,
-    } = data;
-    const r = await client.query(
-      `UPDATE tasks SET
-         title=$1, description=$2, start_time=$3, end_time=$4, task_type=$5,
-         is_completed=$6, source_type=$7, source_id=$8,
-         priority=COALESCE($9, priority),
-         latitude=$10, longitude=$11, address_name=$12,
-         is_deleted=FALSE, mod_time=CURRENT_TIMESTAMP
-       WHERE id=$13 AND user_id=$14 RETURNING *`,
-      [
-        title, description, start_time, end_time,
-        task_type?.toUpperCase()   ?? 'TODO',
-        is_completed,
-        source_type?.toUpperCase() ?? 'MANUAL',
-        source_id,
-        sanitizePriority(data.priority),
-        sanitizeLat(data.latitude),
-        sanitizeLng(data.longitude),
-        address_name,
-        id, userId,
-      ],
-    );
-    return r.rows[0];
-  }
+const updateTagRow = async (userId, data) => {
   const { id, name, color_hex = null } = data;
-  const r = await client.query(
+  const r = await query(
     `UPDATE tags SET name=$1, color_hex=$2, is_deleted=FALSE, mod_time=CURRENT_TIMESTAMP
      WHERE id=$3 AND user_id=$4 RETURNING *`,
     [name, color_hex, id, userId],
@@ -133,20 +113,25 @@ const updateItem = async (client, table, userId, data) => {
   return r.rows[0];
 };
 
-const processSyncItem = async (client, item, table, userId) => {
+// Each item is processed independently: one failure must not block the rest.
+const processSyncItem = async (item, table, userId) => {
   const { _action = 'upsert', mod_time: clientModTime, ...data } = item;
   const isDelete = _action === 'delete';
 
   try {
     if (!data.id) {
       if (isDelete) return { _action, status: 'skipped', reason: 'Không thể xóa item chưa có id.' };
-      return { _action, status: 'created', data: await createItem(client, table, userId, data) };
+      const row = table === 'tasks' ? await createTaskRow(userId, data) : await createTagRow(userId, data);
+      return { _action, status: 'created', data: row };
     }
-    const existing = await getItem(client, table, data.id, userId);
+
+    const existing = await getItem(table, data.id, userId);
     if (!existing) {
       if (isDelete) return { id: data.id, _action, status: 'skipped', reason: 'Item không tồn tại trên server.' };
-      return { _action, status: 'created', data: await createItem(client, table, userId, data) };
+      const row = table === 'tasks' ? await createTaskRow(userId, data) : await createTagRow(userId, data);
+      return { _action, status: 'created', data: row };
     }
+
     if (clientModTime && new Date(existing.mod_time) > new Date(clientModTime)) {
       return {
         id:              data.id,
@@ -157,8 +142,11 @@ const processSyncItem = async (client, item, table, userId) => {
         server_mod_time: existing.mod_time,
       };
     }
-    if (isDelete) return { id: data.id, _action, status: 'deleted', data: await softDelete(client, table, data.id) };
-    return { id: data.id, _action, status: 'updated', data: await updateItem(client, table, userId, data) };
+
+    if (isDelete) return { id: data.id, _action, status: 'deleted', data: await softDelete(table, data.id) };
+
+    const row = table === 'tasks' ? await updateTaskRow(userId, data) : await updateTagRow(userId, data);
+    return { id: data.id, _action, status: 'updated', data: row };
   } catch (err) {
     return { id: data.id, _action, status: 'error', error: err.message };
   }
@@ -216,32 +204,32 @@ router.get('/', async (req, res, next) => {
 // Body: { tasks: [{_action, id?, mod_time, ...fields}], tags: [...] }
 // status per item: created | updated | deleted | conflict | skipped | error
 router.post('/', async (req, res, next) => {
-  const { tasks = [], tags = [] } = req.body;
-  if (!Array.isArray(tasks) || !Array.isArray(tags)) {
-    return res.status(400).json({ success: false, message: 'tasks và tags phải là array.' });
-  }
-
-  const { rows: [{ server_time }] } = await query('SELECT NOW() AS server_time');
-  const results = { tasks: [], tags: [] };
-  const client  = await getClient();
   try {
-    for (const item of tasks) results.tasks.push(await processSyncItem(client, item, 'tasks', req.user.id));
-    for (const item of tags)  results.tags.push(await processSyncItem(client, item, 'tags', req.user.id));
+    const { tasks = [], tags = [] } = req.body;
+    if (!Array.isArray(tasks) || !Array.isArray(tags)) {
+      return res.status(400).json({ success: false, message: 'tasks và tags phải là array.' });
+    }
+
+    const { rows: [{ server_time }] } = await query('SELECT NOW() AS server_time');
+
+    // Items are independent (each can fail without blocking others), so process in parallel.
+    const [taskResults, tagResults] = await Promise.all([
+      Promise.all(tasks.map((item) => processSyncItem(item, 'tasks', req.user.id))),
+      Promise.all(tags.map((item)  => processSyncItem(item, 'tags',  req.user.id))),
+    ]);
+
+    const allResults = [...taskResults, ...tagResults];
     res.json({
       success: true,
       server_time,
-      results,
+      results: { tasks: taskResults, tags: tagResults },
       meta: {
         tasks_processed: tasks.length,
         tags_processed:  tags.length,
-        conflicts:       [...results.tasks, ...results.tags].filter((r) => r.status === 'conflict').length,
+        conflicts:       allResults.filter((r) => r.status === 'conflict').length,
       },
     });
-  } catch (err) {
-    next(err);
-  } finally {
-    client.release();
-  }
+  } catch (err) { next(err); }
 });
 
 export default router;

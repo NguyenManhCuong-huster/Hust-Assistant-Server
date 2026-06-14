@@ -65,11 +65,12 @@ app.use((req, res) => {
 });
 
 app.use((err, _req, res, _next) => {
-  console.error('[Error]', err);
-  res.status(500).json({
+  const status = err.statusCode ?? 500;
+  if (status >= 500) console.error('[Error]', err);
+  res.status(status).json({
     success: false,
-    message: 'Lỗi server nội bộ.',
-    ...(process.env.NODE_ENV === 'development' && { error: err.message }),
+    message: err.message || 'Lỗi server nội bộ.',
+    ...(process.env.NODE_ENV === 'development' && status >= 500 && { stack: err.stack }),
   });
 });
 

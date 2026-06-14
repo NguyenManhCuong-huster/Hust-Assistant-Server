@@ -1,8 +1,9 @@
-import express                       from 'express';
-import { requireAuth }               from '../middleware/authMiddleware.js';
-import { query }                     from '../config/db.js';
-import { syncEmailsForUser }         from '../services/emailSyncService.js';
-import * as att                      from '../services/attachmentService.js';
+import express                         from 'express';
+import { requireAuth }                 from '../middleware/authMiddleware.js';
+import { query }                       from '../config/db.js';
+import { syncEmailsForUser }           from '../services/emailSyncService.js';
+import * as att                        from '../services/attachmentService.js';
+import { parsePagination, buildPageMeta } from '../utils/paginate.js';
 
 const router = express.Router();
 
@@ -18,7 +19,6 @@ const EMAIL_FULL_FIELDS = `
   e.body_text, e.body_html
 `;
 
-// Helper: build WHERE từ query params
 const buildWhereClauses = (req, startIdx) => {
   const { account_id, q, from, to, include_deleted = 'false' } = req.query;
   const conditions = ['uac.user_id = $1'];
@@ -37,27 +37,12 @@ const buildWhereClauses = (req, startIdx) => {
   return { where: conditions.join(' AND '), params, nextIdx: idx };
 };
 
-/** Bulk-fetch attachments cho 1 list email rows, gán vào row.attachments. */
-const attachAttachments = async (rows) => {
-  if (!rows || rows.length === 0) return rows;
-  const ids = rows.map((r) => r.id);
-  const map = await att.listForOwnersBulk(att.OWNER_EMAIL, ids);
-  for (const row of rows) {
-    row.attachments = map.get(row.id) ?? [];
-  }
-  return rows;
-};
-
-// ─── GET /api/emails ───────────────────────────────────
+// GET /api/emails  — threaded (DISTINCT ON thread_id)
 router.get('/', requireAuth, async (req, res, next) => {
   try {
-    const safePage  = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
-    const safeLimit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 50));
-    const offset    = (safePage - 1) * safeLimit;
-
+    const { page, limit, offset } = parsePagination(req.query, { defaultLimit: 50 });
     const built = buildWhereClauses(req, 2);
     let idx = built.nextIdx;
-    const dataParams  = [...built.params, safeLimit, offset];
 
     const dataSql = `
       SELECT * FROM (
@@ -73,7 +58,6 @@ router.get('/', requireAuth, async (req, res, next) => {
       ORDER BY received_at DESC
       LIMIT $${idx++} OFFSET $${idx++}
     `;
-
     const countSql = `
       SELECT COUNT(*) FROM (
         SELECT DISTINCT COALESCE(e.gmail_thread_id, e.gmail_message_id) AS tid
@@ -84,30 +68,20 @@ router.get('/', requireAuth, async (req, res, next) => {
     `;
 
     const [dataRes, countRes] = await Promise.all([
-      query(dataSql, dataParams),
+      query(dataSql, [...built.params, limit, offset]),
       query(countSql, built.params),
     ]);
+    await att.attachToRows(att.OWNER_EMAIL, dataRes.rows);
 
-    await attachAttachments(dataRes.rows);
-
-    const total     = Number.parseInt(countRes.rows[0].count, 10);
-    const totalPage = Math.ceil(total / safeLimit);
-
-    res.json({
-      success: true,
-      data:    dataRes.rows,
-      meta: { total, page: safePage, limit: safeLimit, total_page: totalPage, has_next: safePage < totalPage },
-    });
+    const total = Number.parseInt(countRes.rows[0].count, 10);
+    res.json({ success: true, data: dataRes.rows, meta: buildPageMeta(total, page, limit) });
   } catch (err) { next(err); }
 });
 
-// ─── GET /api/emails/all ──────────────────────────────
+// GET /api/emails/all  — flat list, no threading
 router.get('/all', requireAuth, async (req, res, next) => {
   try {
-    const safePage  = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
-    const safeLimit = Math.min(500, Math.max(1, Number.parseInt(req.query.limit, 10) || 200));
-    const offset    = (safePage - 1) * safeLimit;
-
+    const { page, limit, offset } = parsePagination(req.query, { defaultLimit: 200, maxLimit: 500 });
     const built = buildWhereClauses(req, 2);
     let idx = built.nextIdx;
 
@@ -120,7 +94,7 @@ router.get('/all', requireAuth, async (req, res, next) => {
          WHERE ${built.where}
          ORDER BY e.received_at DESC
          LIMIT $${idx++} OFFSET $${idx++}`,
-        [...built.params, safeLimit, offset],
+        [...built.params, limit, offset],
       ),
       query(
         `SELECT COUNT(*) FROM emails e
@@ -129,21 +103,14 @@ router.get('/all', requireAuth, async (req, res, next) => {
         built.params,
       ),
     ]);
+    await att.attachToRows(att.OWNER_EMAIL, dataRes.rows);
 
-    await attachAttachments(dataRes.rows);
-
-    const total     = Number.parseInt(countRes.rows[0].count, 10);
-    const totalPage = Math.ceil(total / safeLimit);
-
-    res.json({
-      success: true,
-      data:    dataRes.rows,
-      meta: { total, page: safePage, limit: safeLimit, total_page: totalPage, has_next: safePage < totalPage },
-    });
+    const total = Number.parseInt(countRes.rows[0].count, 10);
+    res.json({ success: true, data: dataRes.rows, meta: buildPageMeta(total, page, limit) });
   } catch (err) { next(err); }
 });
 
-// ─── GET /api/emails/:id/thread ────────────────────────
+// GET /api/emails/:id/thread
 router.get('/:id/thread', requireAuth, async (req, res, next) => {
   try {
     const anchorRes = await query(
@@ -156,51 +123,38 @@ router.get('/:id/thread', requireAuth, async (req, res, next) => {
     const anchor = anchorRes.rows[0];
     if (!anchor) return res.status(404).json({ success: false, message: 'Email not found.' });
 
+    let rows;
     if (!anchor.gmail_thread_id) {
-      const single = await query(
+      const r = await query(
+        `SELECT ${EMAIL_FULL_FIELDS} FROM emails e JOIN accounts a ON a.id = e.account_id WHERE e.id = $1`,
+        [anchor.id],
+      );
+      rows = r.rows;
+    } else {
+      const r = await query(
         `SELECT ${EMAIL_FULL_FIELDS}
          FROM emails e
          JOIN accounts a ON a.id = e.account_id
-         WHERE e.id = $1`,
-        [anchor.id],
+         JOIN user_account_cross_ref uac ON uac.account_id = e.account_id
+         WHERE uac.user_id = $1
+           AND e.gmail_thread_id = $2
+           AND e.account_id      = $3
+           AND e.received_at    <= $4
+           AND e.is_deleted = FALSE
+         ORDER BY e.received_at ASC`,
+        [req.user.id, anchor.gmail_thread_id, anchor.account_id, anchor.received_at],
       );
-      await attachAttachments(single.rows);
-      return res.json({
-        success: true,
-        data: {
-          thread_id: anchor.gmail_message_id,
-          messages:  single.rows,
-        },
-      });
+      rows = r.rows;
     }
-
-    const threadRes = await query(
-      `SELECT ${EMAIL_FULL_FIELDS}
-       FROM emails e
-       JOIN accounts a ON a.id = e.account_id
-       JOIN user_account_cross_ref uac ON uac.account_id = e.account_id
-       WHERE uac.user_id = $1
-         AND e.gmail_thread_id = $2
-         AND e.account_id      = $3
-         AND e.received_at    <= $4
-         AND e.is_deleted = FALSE
-       ORDER BY e.received_at ASC`,
-      [req.user.id, anchor.gmail_thread_id, anchor.account_id, anchor.received_at],
-    );
-
-    await attachAttachments(threadRes.rows);
-
+    await att.attachToRows(att.OWNER_EMAIL, rows);
     res.json({
       success: true,
-      data: {
-        thread_id: anchor.gmail_thread_id,
-        messages:  threadRes.rows,
-      },
+      data: { thread_id: anchor.gmail_thread_id ?? anchor.gmail_message_id, messages: rows },
     });
   } catch (err) { next(err); }
 });
 
-// ─── GET /api/emails/:id ───────────────────────────────
+// GET /api/emails/:id
 router.get('/:id', requireAuth, async (req, res, next) => {
   try {
     const r = await query(
@@ -217,7 +171,7 @@ router.get('/:id', requireAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// ─── GET /api/emails/:id/attachments ───────────────────
+// GET /api/emails/:id/attachments
 router.get('/:id/attachments', requireAuth, async (req, res, next) => {
   try {
     const ok = await query(
@@ -234,6 +188,7 @@ router.get('/:id/attachments', requireAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// DELETE /api/emails/:id
 router.delete('/:id', requireAuth, async (req, res, next) => {
   try {
     const check = await query(
@@ -243,7 +198,6 @@ router.delete('/:id', requireAuth, async (req, res, next) => {
       [req.params.id, req.user.id],
     );
     if (!check.rows[0]) return res.status(404).json({ success: false, message: 'Email not found.' });
-
     const r = await query(
       `UPDATE emails SET is_deleted = TRUE, mod_time = CURRENT_TIMESTAMP
        WHERE id = $1 RETURNING id, is_deleted, mod_time`,
@@ -253,12 +207,13 @@ router.delete('/:id', requireAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/emails/sync
 router.post('/sync', requireAuth, async (req, res, next) => {
   try {
     const { account_id } = req.body;
     if (account_id) {
       const check = await query(
-        `SELECT 1 FROM user_account_cross_ref WHERE user_id = $1 AND account_id = $2`,
+        'SELECT 1 FROM user_account_cross_ref WHERE user_id = $1 AND account_id = $2',
         [req.user.id, account_id],
       );
       if (!check.rows[0]) {
@@ -267,11 +222,7 @@ router.post('/sync', requireAuth, async (req, res, next) => {
     }
     const result = await syncEmailsForUser(req.user.id);
     const total  = result.accounts?.reduce((s, a) => s + (a.new_emails ?? 0), 0) ?? 0;
-    res.json({
-      success: true,
-      message: `Sync complete. ${total} new email(s) fetched.`,
-      data:    result,
-    });
+    res.json({ success: true, message: `Sync complete. ${total} new email(s) fetched.`, data: result });
   } catch (err) { next(err); }
 });
 
