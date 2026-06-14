@@ -1,54 +1,47 @@
 import { isTextExtractable } from './attachmentTextService.js';
 import { isInlineImageMime } from './attachmentService.js';
 
-const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 
-const getModel  = () => process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
+const getModel  = () => process.env.OPENROUTER_MODEL  || 'deepseek/deepseek-chat-v4-5';
 const getApiKey = () => {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error('GEMINI_API_KEY chưa được set trong .env');
+  const key = process.env.OPENROUTER_API_KEY;
+  if (!key) throw new Error('OPENROUTER_API_KEY chưa được set trong .env');
   return key;
 };
 
-/**
- * Convert 1 message của ta sang 1 content của Gemini.
- *
- * MỚI 2026-06: nếu message.attachments có ID nằm trong inlineDataMap → chèn
- *   `inlineData` parts (ảnh base64) vào TRƯỚC text part. AI nhìn thấy ảnh
- *   ngay tại message đó trong lịch sử hội thoại (đúng turn user đã gửi).
- *
- * Nếu không có attachment ảnh nào & content rỗng, vẫn push 1 text part rỗng
- * để parts[] không rỗng (yêu cầu của Gemini API).
- */
-const messageToContent = (m, inlineDataMap) => {
+// Chuyển internal message → OpenAI content format.
+// Ảnh (nếu có) được nhúng dưới dạng image_url data URI — chỉ hoạt động với
+// model hỗ trợ vision. Model text-only sẽ bỏ qua phần ảnh.
+const messageToOAI = (m, inlineDataMap) => {
   const parts = [];
 
-  // 1) Inline image parts (nếu có)
   if (inlineDataMap && Array.isArray(m.attachments)) {
     for (const att of m.attachments) {
       const inline = inlineDataMap.get(att.id);
       if (!inline) continue;
       parts.push({
-        inlineData: {
-          mimeType: inline.mimeType,
-          data:     inline.base64Data,
-        },
+        type:      'image_url',
+        image_url: { url: `data:${inline.mimeType};base64,${inline.base64Data}` },
       });
     }
   }
 
-  // 2) Text part — luôn append nếu có content; nếu chưa có part nào (vd
-  //    user chỉ gửi ảnh mà không có content), push 1 text rỗng cho an toàn.
   const text = String(m.content ?? '');
   if (text.length > 0 || parts.length === 0) {
-    parts.push({ text });
+    parts.push({ type: 'text', text });
   }
 
-  return {
-    role:  m.role === 'assistant' ? 'model' : 'user',
-    parts,
-  };
+  // Dùng string thuần nếu chỉ có text (compat rộng hơn với các model)
+  const content = parts.length === 1 && parts[0].type === 'text' ? text : parts;
+  return { role: m.role === 'assistant' ? 'assistant' : 'user', content };
 };
+
+// Chuyển Gemini-style function declaration → OpenAI tool format
+const toOAITool = (decl) => ({
+  type:     'function',
+  function: { name: decl.name, description: decl.description, parameters: decl.parameters },
+});
 
 export const chat = async ({
   messages,
@@ -58,97 +51,106 @@ export const chat = async ({
   tools             = null,
   toolExecutor      = null,
   maxIterations     = 5,
-  inlineDataMap     = null,   // ← MỚI 2026-06: Map<attachment_id, {mimeType, base64Data}>
+  inlineDataMap     = null,
 }) => {
   if (!Array.isArray(messages) || messages.length === 0) {
     throw new Error('messages phải là array không rỗng');
   }
 
-  const url = `${GEMINI_BASE}/${model || getModel()}:generateContent?key=${getApiKey()}`;
+  const url      = `${OPENROUTER_BASE}/chat/completions`;
+  const useModel = model || getModel();
+  const oaiTools = Array.isArray(tools) && tools.length > 0 ? tools.map(toOAITool) : null;
+  const useTools = oaiTools !== null && typeof toolExecutor === 'function';
 
-  // Convert messages → Gemini contents. Inline ảnh được nhúng theo từng
-  // message; text-extractable files vẫn đi qua tool `read_attachment`
-  // (xem buildAttachmentsSystemNote).
-  const contents = messages.map((m) => messageToContent(m, inlineDataMap));
+  // Xây messages OpenAI: system trước, rồi history
+  const oaiMessages = [];
+  if (systemInstruction) {
+    oaiMessages.push({ role: 'system', content: systemInstruction });
+  }
+  for (const m of messages) {
+    oaiMessages.push(messageToOAI(m, inlineDataMap));
+  }
 
-  const usageAccum = {
-    promptTokenCount:     0,
-    candidatesTokenCount: 0,
-    totalTokenCount:      0,
-  };
-  const toolCalls = [];
-  const useTools  = Array.isArray(tools) && tools.length > 0 && typeof toolExecutor === 'function';
+  const usageAccum = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  const toolCalls  = [];
 
   for (let iter = 0; iter < maxIterations; iter++) {
     const body = {
-      contents,
-      generationConfig: { temperature, maxOutputTokens: 8192 },
+      model:       useModel,
+      messages:    oaiMessages,
+      temperature,
+      max_tokens:  8192,
     };
-    if (systemInstruction) {
-      body.systemInstruction = { parts: [{ text: systemInstruction }] };
-    }
     if (useTools) {
-      body.tools = [{ functionDeclarations: tools }];
+      body.tools       = oaiTools;
+      body.tool_choice = 'auto';
     }
 
     const res = await fetch(url, {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(body),
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${getApiKey()}`,
+        'HTTP-Referer':  process.env.SERVER_URL || 'http://localhost:3000',
+        'X-Title':       'HustAssistant',
+      },
+      body: JSON.stringify(body),
     });
+
     if (!res.ok) {
       const errText = await res.text();
-      throw new Error(`Gemini API ${res.status}: ${errText}`);
+      const err = new Error(`OpenRouter ${res.status}: ${errText}`);
+      // 4xx từ OpenRouter (sai model, hết quota, lỗi request) → trả 400 về client thay vì 500
+      err.statusCode = res.status >= 500 ? 502 : 400;
+      throw err;
     }
 
-    const data = await res.json();
+    const data    = await res.json();
+    const choice  = data.choices?.[0];
+    const message = choice?.message;
+    if (!message) throw new Error('OpenRouter: phản hồi thiếu message');
 
-    if (data.usageMetadata) {
-      usageAccum.promptTokenCount     += data.usageMetadata.promptTokenCount     ?? 0;
-      usageAccum.candidatesTokenCount += data.usageMetadata.candidatesTokenCount ?? 0;
-      usageAccum.totalTokenCount      += data.usageMetadata.totalTokenCount      ?? 0;
+    if (data.usage) {
+      usageAccum.prompt_tokens     += data.usage.prompt_tokens     ?? 0;
+      usageAccum.completion_tokens += data.usage.completion_tokens ?? 0;
+      usageAccum.total_tokens      += data.usage.total_tokens      ?? 0;
     }
 
-    const candidate = data.candidates?.[0];
-    const parts     = candidate?.content?.parts ?? [];
+    const aiToolCalls = message.tool_calls;
+    const textReply   = typeof message.content === 'string' ? message.content : '';
 
-    const functionCalls = parts.filter((p) => p.functionCall).map((p) => p.functionCall);
-    const textReply     = parts.filter((p) => typeof p.text === 'string').map((p) => p.text).join('');
-
-    if (!useTools || functionCalls.length === 0) {
-      return {
-        reply:     textReply,
-        usage:     data.usageMetadata ? usageAccum : null,
-        toolCalls,
-      };
+    // Không có tool call → xong
+    if (!useTools || !aiToolCalls?.length) {
+      return { reply: textReply, usage: usageAccum, toolCalls };
     }
 
-    contents.push(candidate.content);
+    // Append assistant message (có chứa tool_calls) vào history
+    oaiMessages.push(message);
 
-    const responseParts = [];
-    for (const fc of functionCalls) {
+    // Thực thi từng tool call, append kết quả dưới dạng role=tool
+    for (const tc of aiToolCalls) {
+      const name = tc.function?.name ?? '';
+      let   args = {};
+      try { args = JSON.parse(tc.function?.arguments ?? '{}'); } catch { /* model trả JSON lỗi */ }
+
       let result;
       try {
-        result = await toolExecutor(fc.name, fc.args ?? {});
+        result = await toolExecutor(name, args);
       } catch (err) {
         result = { success: false, error: err.message ?? String(err) };
       }
-      toolCalls.push({ name: fc.name, args: fc.args ?? {}, result });
+      toolCalls.push({ name, args, result });
 
-      const fnResponse = {
-        name:     fc.name,
-        response: { result },
-      };
-      if (fc.id) fnResponse.id = fc.id;
-
-      responseParts.push({ functionResponse: fnResponse });
+      oaiMessages.push({
+        role:         'tool',
+        tool_call_id: tc.id,
+        content:      JSON.stringify(result),
+      });
     }
-    contents.push({ role: 'user', parts: responseParts });
   }
 
   return {
-    reply:
-      '(AI đã thực hiện hành động nhưng không kịp tổng kết — vui lòng kiểm tra danh sách task.)',
+    reply:     '(AI đã thực hiện hành động nhưng không kịp tổng kết — vui lòng kiểm tra danh sách task.)',
     usage:     usageAccum,
     toolCalls,
   };
