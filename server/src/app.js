@@ -3,20 +3,20 @@ import cors         from 'cors';
 import cookieParser from 'cookie-parser';
 import session      from 'express-session';
 
-import passport               from './config/passport.js';
-import authRoutes             from './routes/auth.js';
-import accountRoutes          from './routes/accounts.js';
-import taskRoutes             from './routes/tasks.js';
-import tagRoutes              from './routes/tags.js';
-import gradeRoutes            from './routes/grades.js';                       // ← MỚI (kết quả học tập)
-import syncRoutes             from './routes/sync.js';
-import userInfoRoutes         from './routes/userInfo.js';
-import emailRoutes            from './routes/emails.js';
-import aiRoutes               from './routes/ai.js';
-import newsRoutes             from './routes/news.js';
-import attachmentRoutes       from './routes/attachments.js';
-import { startPolling }       from './services/emailSyncService.js';
-import { startNewsScheduler } from './services/newsScrapeScheduler.js';
+import passport           from './infrastructure/passport.js';
+import authRoutes         from './modules/auth/auth.routes.js';
+import accountRoutes      from './modules/accounts/accounts.routes.js';
+import taskRoutes         from './modules/tasks/tasks.routes.js';
+import tagRoutes          from './modules/tags/tags.routes.js';
+import gradeRoutes        from './modules/grades/grades.routes.js';
+import syncRoutes         from './modules/sync/sync.routes.js';
+import userInfoRoutes     from './modules/user/user.routes.js';
+import emailRoutes        from './modules/emails/emails.routes.js';
+import aiRoutes           from './modules/ai/ai.routes.js';
+import newsRoutes         from './modules/news/news.routes.js';
+import attachmentRoutes   from './modules/attachments/attachments.routes.js';
+import { startPolling }       from './modules/emails/emails.service.js';
+import { startNewsScheduler } from './modules/news/news.scheduler.js';
 
 const app  = express();
 const PORT = Number.parseInt(process.env.PORT, 10) || 3000;
@@ -44,7 +44,7 @@ app.use('/api/auth',        authRoutes);
 app.use('/api/accounts',    accountRoutes);
 app.use('/api/tasks',       taskRoutes);
 app.use('/api/tags',        tagRoutes);
-app.use('/api/grades',      gradeRoutes);                                      // ← MỚI
+app.use('/api/grades',      gradeRoutes);
 app.use('/api/sync',        syncRoutes);
 app.use('/api/user-info',   userInfoRoutes);
 app.use('/api/emails',      emailRoutes);
