@@ -3,7 +3,7 @@ import { isInlineImageMime } from '../attachments/attachments.service.js';
 
 const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
 
-const getModel  = () => process.env.OPENROUTER_MODEL  || 'deepseek/deepseek-chat-v4-5';
+const getModel  = () => process.env.OPENROUTER_MODEL  || 'deepseek/deepseek-v4-flash';
 const getApiKey = () => {
   const key = process.env.OPENROUTER_API_KEY;
   if (!key) throw new Error('OPENROUTER_API_KEY chưa được set trong .env');
@@ -50,7 +50,7 @@ export const chat = async ({
   temperature       = 0.7,
   tools             = null,
   toolExecutor      = null,
-  maxIterations     = 5,
+  maxIterations     = 20,
   inlineDataMap     = null,
 }) => {
   if (!Array.isArray(messages) || messages.length === 0) {
