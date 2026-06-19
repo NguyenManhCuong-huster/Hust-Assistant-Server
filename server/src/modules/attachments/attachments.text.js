@@ -34,7 +34,7 @@ import { query } from '../../shared/database/db.js';
 import {
   getAttachmentForUser,
   getUploadRoot,
-} from '../attachments/attachments.service.js';
+} from './attachments.service.js';
 
 // ─────────────────────────────────────────────────────────────
 // Limits
