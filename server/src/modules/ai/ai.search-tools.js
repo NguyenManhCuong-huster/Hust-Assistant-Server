@@ -96,8 +96,9 @@ const searchEmailsDeclaration = {
     'không", "email tuần trước về lịch thi nói gì".\n\n' +
     'KHÔNG GỌI nếu user đang chat với context EMAIL CỤ THỂ và họ chỉ hỏi về CHÍNH ' +
     'email đó (nội dung email đã có sẵn trong system instruction).\n\n' +
-    'Tool chỉ trả TÓM TẮT (sender, subject, snippet ngắn). Nếu cần body đầy đủ ' +
-    'của 1 email cụ thể → gọi tiếp `get_email` với `email_id` từ kết quả.\n\n' +
+    'Tool trả TÓM TẮT mỗi email: sender, subject, snippet, received_at, thread_id, ' +
+    'is_read (đã đọc chưa), account_email (địa chỉ hộp thư nhận), attachment_count. ' +
+    'Nếu cần body đầy đủ của 1 email cụ thể → gọi tiếp `get_email` với `email_id` từ kết quả.\n\n' +
     'Có thể gọi KHÔNG có `query` (sẽ trả email mới nhất không lọc). ' +
     'Có thể giới hạn theo `from_date` / `to_date` (ISO date YYYY-MM-DD hoặc datetime).',
   parameters: {
@@ -130,7 +131,8 @@ const searchEmailsDeclaration = {
 const getEmailDeclaration = {
   name: 'get_email',
   description:
-    'Lấy nội dung ĐẦY ĐỦ của 1 email (sender, recipient, subject, body, attachments).\n\n' +
+    'Lấy nội dung ĐẦY ĐỦ của 1 email: sender, recipient, subject, body, is_read, ' +
+    'account_email (hộp thư nhận), attachments.\n\n' +
     'Dùng SAU KHI `search_emails` đã trả kết quả và bạn cần đọc chi tiết 1 email cụ ' +
     'thể để trả lời user.\n\n' +
     'CHỈ gọi với `email_id` đã thấy trong kết quả `search_emails` trước đó — KHÔNG ' +
@@ -293,6 +295,7 @@ const execSearchEmails = async ({ userId, args }) => {
   try {
     const r = await query(
       `SELECT e.id, e.sender, e.subject, e.snippet, e.received_at, e.gmail_thread_id,
+              e.is_read, acc.username_or_email AS account_email,
               (SELECT COUNT(*)::int FROM attachments a
                  WHERE a.owner_type = 'EMAIL'
                    AND a.owner_id   = e.id
@@ -300,6 +303,7 @@ const execSearchEmails = async ({ userId, args }) => {
               ) AS attachment_count
          FROM emails e
          JOIN user_account_cross_ref uac ON uac.account_id = e.account_id
+         JOIN accounts acc ON acc.id = e.account_id
         WHERE ${conditions.join(' AND ')}
         ORDER BY e.received_at DESC NULLS LAST
         LIMIT $${i}`,
@@ -317,6 +321,8 @@ const execSearchEmails = async ({ userId, args }) => {
         snippet:          truncatePreview(row.snippet),
         received_at:      row.received_at,
         thread_id:        row.gmail_thread_id,
+        is_read:          row.is_read,
+        account_email:    row.account_email,
         attachment_count: row.attachment_count ?? 0,
       })),
     };
@@ -345,9 +351,10 @@ const execGetEmail = async ({ userId, args }) => {
     const anchorRes = await query(
       `SELECT e.id, e.gmail_thread_id, e.gmail_message_id, e.account_id,
               e.sender, e.recipient, e.subject, e.snippet, e.body_text,
-              e.received_at
+              e.received_at, e.is_read, acc.username_or_email AS account_email
          FROM emails e
          JOIN user_account_cross_ref uac ON uac.account_id = e.account_id
+         JOIN accounts acc ON acc.id = e.account_id
         WHERE e.id = $1 AND uac.user_id = $2 AND e.is_deleted = FALSE`,
       [emailId, userId],
     );
@@ -377,13 +384,15 @@ const execGetEmail = async ({ userId, args }) => {
       return {
         success: true,
         email: {
-          id:          anchor.id,
-          from:        anchor.sender,
-          to:          anchor.recipient,
-          subject:     anchor.subject,
-          date:        anchor.received_at,
-          body:        truncateBody(body, EMAIL_BODY_MAX_CHARS),
-          truncated:   body.length > EMAIL_BODY_MAX_CHARS,
+          id:            anchor.id,
+          from:          anchor.sender,
+          to:            anchor.recipient,
+          subject:       anchor.subject,
+          date:          anchor.received_at,
+          is_read:       anchor.is_read,
+          account_email: anchor.account_email,
+          body:          truncateBody(body, EMAIL_BODY_MAX_CHARS),
+          truncated:     body.length > EMAIL_BODY_MAX_CHARS,
           attachments,
         },
       };
@@ -391,9 +400,11 @@ const execGetEmail = async ({ userId, args }) => {
 
     // include_thread = true → fetch toàn bộ message cùng gmail_thread_id
     const tRes = await query(
-      `SELECT e.id, e.sender, e.recipient, e.subject, e.snippet, e.body_text, e.received_at
+      `SELECT e.id, e.sender, e.recipient, e.subject, e.snippet, e.body_text, e.received_at,
+              e.is_read, acc.username_or_email AS account_email
          FROM emails e
          JOIN user_account_cross_ref uac ON uac.account_id = e.account_id
+         JOIN accounts acc ON acc.id = e.account_id
         WHERE uac.user_id = $1
           AND e.gmail_thread_id = $2
           AND e.account_id      = $3
@@ -405,13 +416,15 @@ const execGetEmail = async ({ userId, args }) => {
     const messages = tRes.rows.map((m) => {
       const body = m.body_text || m.snippet || '';
       return {
-        id:        m.id,
-        from:      m.sender,
-        to:        m.recipient,
-        subject:   m.subject,
-        date:      m.received_at,
-        body:      truncateBody(body, EMAIL_BODY_MAX_CHARS),
-        truncated: body.length > EMAIL_BODY_MAX_CHARS,
+        id:            m.id,
+        from:          m.sender,
+        to:            m.recipient,
+        subject:       m.subject,
+        date:          m.received_at,
+        is_read:       m.is_read,
+        account_email: m.account_email,
+        body:          truncateBody(body, EMAIL_BODY_MAX_CHARS),
+        truncated:     body.length > EMAIL_BODY_MAX_CHARS,
       };
     });
 

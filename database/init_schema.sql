@@ -130,6 +130,7 @@ CREATE TABLE "emails" (
   body_html        TEXT,
   deep_link_intent TEXT,
   received_at      TIMESTAMPTZ,
+  is_read          BOOLEAN      NOT NULL DEFAULT FALSE,
   mod_time         TIMESTAMPTZ  DEFAULT CURRENT_TIMESTAMP,
   is_deleted       BOOLEAN      DEFAULT FALSE,
   CONSTRAINT uq_emails_account_msg UNIQUE (account_id, gmail_message_id)

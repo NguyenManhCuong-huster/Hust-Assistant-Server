@@ -1,7 +1,7 @@
 ﻿import { parsePagination, buildPageMeta } from '../../shared/utils/paginate.js';
 import * as repo from '../../dao/emails.dao.js';
 import * as att  from '../attachments/attachments.service.js';
-import { syncEmailsForUser } from './emails.service.js';
+import { syncEmailsForUser, markEmailAsRead } from './emails.service.js';
 
 export const listEmails = async (req, res, next) => {
   try {
@@ -63,6 +63,16 @@ export const deleteEmail = async (req, res, next) => {
     const row = await repo.softDeleteEmail(req.params.id);
     res.json({ success: true, data: row });
   } catch (err) { next(err); }
+};
+
+export const markAsRead = async (req, res, next) => {
+  try {
+    await markEmailAsRead(req.params.id, req.user.id);
+    res.json({ success: true });
+  } catch (err) {
+    if (err.status === 404) return res.status(404).json({ success: false, message: err.message });
+    next(err);
+  }
 };
 
 export const syncEmails = async (req, res, next) => {

@@ -48,6 +48,29 @@ const gmailFetch = async (accessToken, path, params = {}) => {
   }
 };
 
+const gmailPost = async (accessToken, path, body) => {
+  const res = await fetch(`${GMAIL_BASE}${path}`, {
+    method:  'POST',
+    headers: {
+      Authorization:  `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) {
+    const err = new Error('Gmail access token expired or revoked.');
+    err.code  = 'TOKEN_EXPIRED';
+    throw err;
+  }
+  if (res.status === 204) return {};
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Gmail API error ${res.status}: ${text}`);
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : {};
+};
+
 const headerOf = (msg, name) => {
   const h = msg.payload?.headers ?? [];
   return h.find((x) => x.name.toLowerCase() === name.toLowerCase())?.value ?? null;
@@ -183,6 +206,7 @@ const parseFullMessage = (msg) => {
     body_html:        html,
     deep_link_intent: buildGmailWebLink(linkId),
     received_at:      receivedAt,
+    is_read:          !(msg.labelIds ?? []).includes('UNREAD'),
     attachments:      extractAttachments(msg.payload),
   };
 };
@@ -264,6 +288,16 @@ export const refreshAccessToken = async (refreshToken) => {
     throw err;
   }
   return res.json();
+};
+
+/**
+ * Bỏ label UNREAD trên Gmail → email được đánh dấu đã đọc.
+ * Endpoint: POST /messages/{id}/modify
+ */
+export const markAsReadOnGmail = async (accessToken, gmailMessageId) => {
+  await gmailPost(accessToken, `/messages/${gmailMessageId}/modify`, {
+    removeLabelIds: ['UNREAD'],
+  });
 };
 
 export const refreshAndPersistAccessToken = async (accountId, refreshToken) => {

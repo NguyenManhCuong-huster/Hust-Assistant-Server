@@ -3,7 +3,7 @@
 export const EMAIL_LIST_FIELDS = `
   e.id, e.account_id, e.gmail_message_id, e.gmail_thread_id,
   e.sender, e.recipient, e.subject, e.snippet,
-  e.deep_link_intent, e.received_at, e.is_deleted, e.mod_time,
+  e.deep_link_intent, e.received_at, e.is_read, e.is_deleted, e.mod_time,
   a.username_or_email AS account_email
 `;
 
@@ -141,6 +141,15 @@ export const softDeleteEmail = async (emailId) => {
   const r = await query(
     `UPDATE emails SET is_deleted = TRUE, mod_time = CURRENT_TIMESTAMP
      WHERE id = $1 RETURNING id, is_deleted, mod_time`,
+    [emailId],
+  );
+  return r.rows[0];
+};
+
+export const markAsReadInDb = async (emailId) => {
+  const r = await query(
+    `UPDATE emails SET is_read = TRUE, mod_time = CURRENT_TIMESTAMP
+     WHERE id = $1 RETURNING id, is_read`,
     [emailId],
   );
   return r.rows[0];

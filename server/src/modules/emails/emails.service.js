@@ -1,7 +1,8 @@
 import { query, getClient }              from '../../shared/database/db.js';
 import { decrypt, encrypt }              from '../../infrastructure/crypto.js';
 import { fetchNewEmails, refreshAccessToken,
-         extractTokens, getAttachmentBytes } from './emails.gmail.js';
+         extractTokens, getAttachmentBytes,
+         markAsReadOnGmail } from './emails.gmail.js';
 import * as att                          from '../attachments/attachments.service.js';
 
 const DEFAULT_SINCE_FALLBACK_DAYS = 7;
@@ -46,6 +47,7 @@ const upsertEmails = async (client, accountId, messages) => {
       sender, recipient, subject, snippet,
       body_text, body_html,
       deep_link_intent, received_at,
+      is_read,
       attachments,
     } = msg;
 
@@ -54,8 +56,8 @@ const upsertEmails = async (client, accountId, messages) => {
          (account_id, gmail_message_id, gmail_thread_id,
           sender, recipient, subject, snippet,
           body_text, body_html,
-          deep_link_intent, received_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          deep_link_intent, received_at, is_read)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        ON CONFLICT (account_id, gmail_message_id) DO UPDATE SET
          gmail_thread_id  = COALESCE(EXCLUDED.gmail_thread_id, emails.gmail_thread_id),
          sender           = COALESCE(EXCLUDED.sender, emails.sender),
@@ -65,13 +67,14 @@ const upsertEmails = async (client, accountId, messages) => {
          body_text        = EXCLUDED.body_text,
          body_html        = EXCLUDED.body_html,
          deep_link_intent = EXCLUDED.deep_link_intent,
-         received_at      = COALESCE(EXCLUDED.received_at, emails.received_at)
+         received_at      = COALESCE(EXCLUDED.received_at, emails.received_at),
+         is_read          = EXCLUDED.is_read
        RETURNING id, (xmax = 0) AS inserted`,
       [
         accountId, gmail_message_id, gmail_thread_id,
         sender, recipient, subject, snippet,
         body_text, body_html,
-        deep_link_intent, received_at,
+        deep_link_intent, received_at, is_read ?? false,
       ],
     );
     out.push({
@@ -276,4 +279,54 @@ export const startPolling = (intervalMs = 5 * 60 * 1000) => {
 
 export const stopPolling = () => {
   if (_pollingTimer) { clearInterval(_pollingTimer); _pollingTimer = null; }
+};
+
+/**
+ * Đánh dấu email đã đọc:
+ *  1. Cập nhật DB is_read = TRUE.
+ *  2. Gọi Gmail API bỏ label UNREAD (best-effort — lỗi không throw).
+ */
+export const markEmailAsRead = async (emailId, userId) => {
+  const emailRes = await query(
+    `SELECT e.id, e.gmail_message_id, e.is_read, e.account_id,
+            a.access_token, a.status AS account_status
+     FROM emails e
+     JOIN accounts a ON a.id = e.account_id
+     JOIN user_account_cross_ref uac ON uac.account_id = e.account_id
+     WHERE e.id = $1 AND uac.user_id = $2 AND e.is_deleted = FALSE`,
+    [emailId, userId],
+  );
+  const row = emailRes.rows[0];
+  if (!row) throw Object.assign(new Error('Email not found.'), { status: 404 });
+
+  if (!row.is_read) {
+    await query(
+      `UPDATE emails SET is_read = TRUE, mod_time = CURRENT_TIMESTAMP WHERE id = $1`,
+      [emailId],
+    );
+  }
+
+  // Đồng bộ lên Gmail — best-effort
+  if (row.account_status === 'ACTIVE') {
+    try {
+      const { accessToken, refreshToken } = extractTokens(decrypt(row.access_token));
+      try {
+        await markAsReadOnGmail(accessToken, row.gmail_message_id);
+      } catch (err) {
+        if (err.code === 'TOKEN_EXPIRED' && refreshToken) {
+          const refreshed = await refreshAccessToken(refreshToken);
+          await query(
+            `UPDATE accounts SET access_token = $1 WHERE id = $2`,
+            [
+              encrypt(JSON.stringify({ access_token: refreshed.access_token, refresh_token: refreshToken })),
+              row.account_id,
+            ],
+          );
+          await markAsReadOnGmail(refreshed.access_token, row.gmail_message_id);
+        }
+      }
+    } catch (gmailErr) {
+      console.warn(`[MarkRead] Gmail sync failed for ${emailId}: ${gmailErr.message}`);
+    }
+  }
 };
