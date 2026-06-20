@@ -314,6 +314,15 @@ const execSearchEmails = async ({ userId, args }) => {
       success: true,
       query:   q || null,
       count:   r.rows.length,
+      // Tham số HIỆU LỰC thực tế (gồm cả mặc định server tự áp) để AI báo cho
+      // user biết đã tra với điều kiện gì — kể cả khi model không truyền gì.
+      effective_params: {
+        query:     q || null,                 // null = KHÔNG lọc từ khóa (lấy mới nhất)
+        from_date: fromDate || null,          // null = KHÔNG giới hạn ngày bắt đầu
+        to_date:   toDate || null,            // null = KHÔNG giới hạn ngày kết thúc
+        limit,                                // số email tối đa lấy về (mặc định 10)
+        sort:      'received_at DESC (mới nhất trước)',
+      },
       results: r.rows.map((row) => ({
         id:               row.id,
         from:             row.sender,
@@ -383,6 +392,7 @@ const execGetEmail = async ({ userId, args }) => {
       const body = anchor.body_text || anchor.snippet || '';
       return {
         success: true,
+        effective_params: { email_id: emailId, include_thread: includeThread },
         email: {
           id:            anchor.id,
           from:          anchor.sender,
@@ -430,6 +440,7 @@ const execGetEmail = async ({ userId, args }) => {
 
     return {
       success:               true,
+      effective_params:      { email_id: emailId, include_thread: includeThread },
       thread_id:             anchor.gmail_thread_id,
       message_count:         messages.length,
       messages,
@@ -481,6 +492,12 @@ const execSearchNews = async ({ args }) => {
       query:   q || null,
       kind:    kindRaw || null,
       count:   r.rows.length,
+      effective_params: {
+        query: q || null,                     // null = KHÔNG lọc từ khóa (lấy mới nhất)
+        kind:  kindRaw || null,               // null = CẢ tin tức (NEWS) lẫn kế hoạch (PLAN)
+        limit,                                // số bài tối đa lấy về (mặc định 10)
+        sort:  'published_at DESC (mới nhất trước)',
+      },
       results: r.rows.map((row) => ({
         id:           row.id,
         kind:         row.kind,
@@ -531,6 +548,7 @@ const execGetNews = async ({ args }) => {
     const summary = news.summary || '';
     return {
       success: true,
+      effective_params: { news_id: newsId },
       news: {
         id:           news.id,
         kind:         news.kind,
@@ -639,6 +657,10 @@ const execWebSearch = async ({ args }) => {
       success: true,
       query:   q,
       count:   results.length,
+      effective_params: {
+        query: q,
+        num,                                  // số kết quả tối đa yêu cầu (mặc định 5)
+      },
       results: results.map((it) => ({
         title:   it.title  ?? '',
         link:    it.url    ?? '',

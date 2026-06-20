@@ -157,6 +157,168 @@ export const chat = async ({
 };
 
 // ─────────────────────────────────────────────────────────────
+// chatStream — biến thể STREAMING của chat() (MỚI 2026-06).
+//
+// Giống chat() về luồng tool-call (multi-iteration), nhưng dùng OpenRouter
+// `stream: true` để đẩy text deltas về caller NGAY khi model sinh ra, qua 2
+// callback:
+//   - onDelta(text)      : 1 đoạn text mới của câu trả lời.
+//   - onToolCall({name,args,result}) : 1 tool vừa chạy xong.
+//
+// Trả về { reply, usage, toolCalls } y hệt chat() (reply = text turn cuối) để
+// caller resolveReferences() + persist như cũ. Callback chỉ là kênh phụ; giá
+// trị trả về vẫn là nguồn chính thống.
+// ─────────────────────────────────────────────────────────────
+export const chatStream = async ({
+  messages,
+  systemInstruction = null,
+  model             = null,
+  temperature       = 0.7,
+  tools             = null,
+  toolExecutor      = null,
+  maxIterations     = 20,
+  inlineDataMap     = null,
+  onDelta           = null,
+  onToolCall        = null,
+}) => {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    throw new Error('messages phải là array không rỗng');
+  }
+
+  const url      = `${OPENROUTER_BASE}/chat/completions`;
+  const useModel = model || getModel();
+  const oaiTools = Array.isArray(tools) && tools.length > 0 ? tools.map(toOAITool) : null;
+  const useTools = oaiTools !== null && typeof toolExecutor === 'function';
+
+  const oaiMessages = [];
+  if (systemInstruction) oaiMessages.push({ role: 'system', content: systemInstruction });
+  for (const m of messages) oaiMessages.push(messageToOAI(m, inlineDataMap));
+
+  const usageAccum = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  const toolCalls  = [];
+
+  for (let iter = 0; iter < maxIterations; iter++) {
+    const body = {
+      model:          useModel,
+      messages:       oaiMessages,
+      temperature,
+      max_tokens:     8192,
+      stream:         true,
+      stream_options: { include_usage: true },
+    };
+    if (useTools) {
+      body.tools       = oaiTools;
+      body.tool_choice = 'auto';
+    }
+
+    const res = await fetch(url, {
+      method:  'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${getApiKey()}`,
+        'HTTP-Referer':  process.env.SERVER_URL || 'http://localhost:3000',
+        'X-Title':       'HustAssistant',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok || !res.body) {
+      const errText = await res.text().catch(() => '');
+      const err = new Error(`OpenRouter ${res.status}: ${errText}`);
+      err.statusCode = res.status >= 500 ? 502 : 400;
+      throw err;
+    }
+
+    // ── Parse SSE stream (data: {...}\n\n ... data: [DONE]) ──
+    let contentBuf = '';
+    const toolAccum = new Map();              // index → { id, name, arguments }
+    let buffer  = '';
+    const decoder = new TextDecoder();
+
+    for await (const chunk of res.body) {
+      buffer += decoder.decode(chunk, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (data === '[DONE]') { buffer = ''; break; }
+
+        let json;
+        try { json = JSON.parse(data); } catch { continue; }
+
+        if (json.usage) {
+          usageAccum.prompt_tokens     += json.usage.prompt_tokens     ?? 0;
+          usageAccum.completion_tokens += json.usage.completion_tokens ?? 0;
+          usageAccum.total_tokens      += json.usage.total_tokens      ?? 0;
+        }
+
+        const delta = json.choices?.[0]?.delta;
+        if (!delta) continue;
+
+        if (typeof delta.content === 'string' && delta.content.length > 0) {
+          contentBuf += delta.content;
+          if (onDelta) onDelta(delta.content);
+        }
+
+        if (Array.isArray(delta.tool_calls)) {
+          for (const tc of delta.tool_calls) {
+            const idx = tc.index ?? 0;
+            const cur = toolAccum.get(idx) ?? { id: '', name: '', arguments: '' };
+            if (tc.id)                 cur.id        = tc.id;
+            if (tc.function?.name)      cur.name      = tc.function.name;
+            if (tc.function?.arguments) cur.arguments += tc.function.arguments;
+            toolAccum.set(idx, cur);
+          }
+        }
+      }
+    }
+
+    const assembled = [...toolAccum.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, v]) => v);
+
+    // Không có tool call → xong, trả text turn này.
+    if (!useTools || assembled.length === 0) {
+      return { reply: contentBuf, usage: usageAccum, toolCalls };
+    }
+
+    // Append assistant message (có tool_calls) rồi thực thi từng tool.
+    oaiMessages.push({
+      role:       'assistant',
+      content:    contentBuf || '',
+      tool_calls: assembled.map((t) => ({
+        id: t.id, type: 'function', function: { name: t.name, arguments: t.arguments },
+      })),
+    });
+
+    for (const t of assembled) {
+      const name = t.name ?? '';
+      let   args = {};
+      try { args = JSON.parse(t.arguments || '{}'); } catch { /* model trả JSON lỗi */ }
+
+      let result;
+      try {
+        result = await toolExecutor(name, args);
+      } catch (err) {
+        result = { success: false, error: err.message ?? String(err) };
+      }
+      toolCalls.push({ name, args, result });
+      if (onToolCall) onToolCall({ name, args, result });
+
+      oaiMessages.push({ role: 'tool', tool_call_id: t.id, content: JSON.stringify(result) });
+    }
+  }
+
+  return {
+    reply:     '(AI đã thực hiện hành động nhưng không kịp tổng kết — vui lòng kiểm tra danh sách task.)',
+    usage:     usageAccum,
+    toolCalls,
+  };
+};
+
+// ─────────────────────────────────────────────────────────────
 // buildAttachmentsSystemNote — UNIFIED 2026-05-31, mở rộng 2026-06.
 //
 // In ra 2 block (chỉ block nào có data mới render):

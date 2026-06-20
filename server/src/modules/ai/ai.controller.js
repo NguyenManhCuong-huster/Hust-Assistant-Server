@@ -4,7 +4,7 @@ import { getUserProfile } from '../../dao/user.dao.js';
 import { getEmailAnchor, getThread } from '../../dao/emails.dao.js';
 import { getNewsById } from '../../dao/news.dao.js';
 
-import { chat, buildEmailSystemInstruction, buildNewsSystemInstruction } from './ai.service.js';
+import { chat, chatStream, buildEmailSystemInstruction, buildNewsSystemInstruction } from './ai.service.js';
 import {
   TASK_TOOL_DECLARATIONS,
   makeTaskToolExecutor,
@@ -154,148 +154,210 @@ export const uploadAttachment = async (req, res, next) => {
   }
 };
 
-export const standaloneChat = async (req, res, next) => {
-  try {
-    const messages          = normalizeMessages(req.body?.messages);
-    const callerInstruction = req.body?.system_instruction ?? null;
+// ── Prepare functions ───────────────────────────────────────────────────────
+//
+// Mỗi prepare* gom toàn bộ logic chuẩn bị (load context, attachments, inline
+// images, system instruction, tool executor) và trả về đúng bộ tham số cho
+// chat()/chatStream(). Nhờ vậy 2 biến thể JSON (non-stream) và SSE (stream)
+// dùng CHUNG 1 nguồn chuẩn bị → không lặp logic.
+//
+// Trả về: { chatArgs, extra } — chatArgs spread thẳng vào chat()/chatStream();
+// extra là field phụ thêm vào response (vd effective_attachments).
 
-    const [tags, profile, effective] = await Promise.all([
-      listTagsForAI(req.user.id),
-      getUserProfile(req.user.id),
-      collectEffectiveAttachments({ messages, userId: req.user.id }),
-    ]);
+const prepareStandalone = async (req) => {
+  const messages          = normalizeMessages(req.body?.messages);
+  const callerInstruction = req.body?.system_instruction ?? null;
 
-    let baseInstruction = callerInstruction || '';
-    const fileNote = buildFileListNote(effective.attachmentList);
-    if (fileNote) baseInstruction = baseInstruction ? `${baseInstruction}\n\n${fileNote}` : fileNote;
+  const [tags, profile, effective] = await Promise.all([
+    listTagsForAI(req.user.id),
+    getUserProfile(req.user.id),
+    collectEffectiveAttachments({ messages, userId: req.user.id }),
+  ]);
 
-    const { inlineDataMap, attachedSourceImageIds } =
-      await prepareInlineImages({ messages, attachmentList: effective.attachmentList });
+  let baseInstruction = callerInstruction || '';
+  const fileNote = buildFileListNote(effective.attachmentList);
+  if (fileNote) baseInstruction = baseInstruction ? `${baseInstruction}\n\n${fileNote}` : fileNote;
 
-    console.log(
-      `[ai/chat] user=${req.user.id} msgs=${messages.length} effective=${effective.attachmentList.length} ` +
-      `inline_images=${inlineDataMap.size} orphan_attached=${attachedSourceImageIds.length}`,
-    );
+  const { inlineDataMap, attachedSourceImageIds } =
+    await prepareInlineImages({ messages, attachmentList: effective.attachmentList });
 
-    const result = await chat({
+  console.log(
+    `[ai/chat] user=${req.user.id} msgs=${messages.length} effective=${effective.attachmentList.length} ` +
+    `inline_images=${inlineDataMap.size} orphan_attached=${attachedSourceImageIds.length}`,
+  );
+
+  return {
+    chatArgs: {
       messages,
       systemInstruction: composeSystemInstruction(baseInstruction, tags, profile),
       tools:             TASK_TOOL_DECLARATIONS,
       toolExecutor:      makeTaskToolExecutor({ userId: req.user.id, sourceType: 'MANUAL', allowedAttachmentIds: effective.allowedIds }),
       inlineDataMap,
-    });
-
-    const { reply: replyWithRefs, references } = await resolveReferences({ reply: result.reply, userId: req.user.id });
-
-    res.json({
-      success: true,
-      data: {
-        reply:                 replyWithRefs,
-        usage:                 result.usage,
-        tool_calls:            result.toolCalls,
-        effective_attachments: serializeAttachments(effective.attachmentList),
-        references,
-      },
-    });
-  } catch (err) {
-    if (err.statusCode) return res.status(err.statusCode).json({ success: false, message: err.message });
-    next(err);
-  }
+    },
+    extra: { effective_attachments: serializeAttachments(effective.attachmentList) },
+  };
 };
 
-export const emailChat = async (req, res, next) => {
-  try {
-    const { email_id } = req.body;
-    if (!email_id) return res.status(400).json({ success: false, message: 'email_id là bắt buộc.' });
-    const messages = normalizeMessages(req.body?.messages);
+const prepareEmail = async (req) => {
+  const { email_id } = req.body;
+  if (!email_id) { const e = new Error('email_id là bắt buộc.'); e.statusCode = 400; throw e; }
+  const messages = normalizeMessages(req.body?.messages);
 
-    const anchor = await getEmailAnchor(email_id, req.user.id);
-    if (!anchor) return res.status(404).json({ success: false, message: 'Email not found.' });
+  const anchor = await getEmailAnchor(email_id, req.user.id);
+  if (!anchor) { const e = new Error('Email not found.'); e.statusCode = 404; throw e; }
 
-    const threadMessages = await getThread(anchor, req.user.id);
+  const threadMessages = await getThread(anchor, req.user.id);
+  const thread = {
+    thread_id: anchor.gmail_thread_id ?? anchor.gmail_message_id,
+    messages:  threadMessages.map((m) => ({
+      from: m.sender, to: m.recipient, subject: m.subject, date: m.received_at,
+      snippet: m.snippet, body_text: m.body_text, body_html: m.body_html,
+    })),
+  };
 
-    const thread = {
-      thread_id: anchor.gmail_thread_id ?? anchor.gmail_message_id,
-      messages:  threadMessages.map((m) => ({
-        from: m.sender, to: m.recipient, subject: m.subject, date: m.received_at,
-        snippet: m.snippet, body_text: m.body_text, body_html: m.body_html,
-      })),
-    };
+  const threadEmailIds = threadMessages.map((m) => m.id);
+  const attMap         = await att.listForOwnersBulk(att.OWNER_EMAIL, threadEmailIds);
+  const sourceAtts     = [];
+  for (const arr of attMap.values()) sourceAtts.push(...arr);
 
-    const threadEmailIds = threadMessages.map((m) => m.id);
-    const attMap         = await att.listForOwnersBulk(att.OWNER_EMAIL, threadEmailIds);
-    const sourceAtts     = [];
-    for (const arr of attMap.values()) sourceAtts.push(...arr);
+  const effective = await collectEffectiveAttachments({ messages, userId: req.user.id, sourceAttachments: sourceAtts });
+  const { inlineDataMap, attachedSourceImageIds } = await prepareInlineImages({ messages, attachmentList: effective.attachmentList });
 
-    const effective = await collectEffectiveAttachments({ messages, userId: req.user.id, sourceAttachments: sourceAtts });
-    const { inlineDataMap, attachedSourceImageIds } = await prepareInlineImages({ messages, attachmentList: effective.attachmentList });
+  console.log(
+    `[ai/email-chat] anchor=${anchor.id} thread_msgs=${threadEmailIds.length} source_atts=${sourceAtts.length} ` +
+    `effective=${effective.attachmentList.length} inline_images=${inlineDataMap.size} orphan_attached=${attachedSourceImageIds.length}`,
+  );
 
-    console.log(
-      `[ai/email-chat] anchor=${anchor.id} thread_msgs=${threadEmailIds.length} source_atts=${sourceAtts.length} ` +
-      `effective=${effective.attachmentList.length} inline_images=${inlineDataMap.size} orphan_attached=${attachedSourceImageIds.length}`,
-    );
-
-    const [tags, profile] = await Promise.all([listTagsForAI(req.user.id), getUserProfile(req.user.id)]);
-    const result = await chat({
+  const [tags, profile] = await Promise.all([listTagsForAI(req.user.id), getUserProfile(req.user.id)]);
+  return {
+    chatArgs: {
       messages,
       systemInstruction: composeSystemInstruction(buildEmailSystemInstruction(thread, effective.attachmentList), tags, profile),
       tools:             TASK_TOOL_DECLARATIONS,
       toolExecutor:      makeTaskToolExecutor({ userId: req.user.id, sourceType: 'EMAIL', sourceId: anchor.id, allowedAttachmentIds: effective.allowedIds }),
       inlineDataMap,
-    });
-
-    const { reply: replyWithRefs, references } = await resolveReferences({ reply: result.reply, userId: req.user.id });
-    res.json({
-      success: true,
-      data: {
-        reply: replyWithRefs, thread_message_count: thread.messages.length,
-        usage: result.usage, tool_calls: result.toolCalls,
-        effective_attachments: serializeAttachments(effective.attachmentList), references,
-      },
-    });
-  } catch (err) {
-    if (err.statusCode) return res.status(err.statusCode).json({ success: false, message: err.message });
-    next(err);
-  }
+    },
+    extra: {
+      thread_message_count:  thread.messages.length,
+      effective_attachments: serializeAttachments(effective.attachmentList),
+    },
+  };
 };
 
-export const newsChat = async (req, res, next) => {
-  try {
-    const { news_id } = req.body;
-    if (!news_id) return res.status(400).json({ success: false, message: 'news_id là bắt buộc.' });
-    const messages = normalizeMessages(req.body?.messages);
+const prepareNews = async (req) => {
+  const { news_id } = req.body;
+  if (!news_id) { const e = new Error('news_id là bắt buộc.'); e.statusCode = 400; throw e; }
+  const messages = normalizeMessages(req.body?.messages);
 
-    const news = await getNewsById(news_id);
-    if (!news) return res.status(404).json({ success: false, message: 'News not found.' });
+  const news = await getNewsById(news_id);
+  if (!news) { const e = new Error('News not found.'); e.statusCode = 404; throw e; }
 
-    const sourceAtts = await att.listForOwner(att.OWNER_NEWS, news.id);
-    const effective  = await collectEffectiveAttachments({ messages, userId: req.user.id, sourceAttachments: sourceAtts });
-    const { inlineDataMap, attachedSourceImageIds } = await prepareInlineImages({ messages, attachmentList: effective.attachmentList });
+  const sourceAtts = await att.listForOwner(att.OWNER_NEWS, news.id);
+  const effective  = await collectEffectiveAttachments({ messages, userId: req.user.id, sourceAttachments: sourceAtts });
+  const { inlineDataMap, attachedSourceImageIds } = await prepareInlineImages({ messages, attachmentList: effective.attachmentList });
 
-    console.log(
-      `[ai/news-chat] news=${news.id} source_atts=${sourceAtts.length} effective=${effective.attachmentList.length} ` +
-      `inline_images=${inlineDataMap.size} orphan_attached=${attachedSourceImageIds.length}`,
-    );
+  console.log(
+    `[ai/news-chat] news=${news.id} source_atts=${sourceAtts.length} effective=${effective.attachmentList.length} ` +
+    `inline_images=${inlineDataMap.size} orphan_attached=${attachedSourceImageIds.length}`,
+  );
 
-    const [tags, profile] = await Promise.all([listTagsForAI(req.user.id), getUserProfile(req.user.id)]);
-    const result = await chat({
+  const [tags, profile] = await Promise.all([listTagsForAI(req.user.id), getUserProfile(req.user.id)]);
+  return {
+    chatArgs: {
       messages,
       systemInstruction: composeSystemInstruction(buildNewsSystemInstruction(news, effective.attachmentList), tags, profile),
       tools:             TASK_TOOL_DECLARATIONS,
       toolExecutor:      makeTaskToolExecutor({ userId: req.user.id, sourceType: 'NEWS', sourceId: news.id, allowedAttachmentIds: effective.allowedIds }),
       inlineDataMap,
-    });
+    },
+    extra: { effective_attachments: serializeAttachments(effective.attachmentList) },
+  };
+};
 
-    const { reply: replyWithRefs, references } = await resolveReferences({ reply: result.reply, userId: req.user.id });
+// ── Runners ─────────────────────────────────────────────────────────────────
+
+/** Chạy 1 lượt chat non-stream (JSON), trả response 1 lần. */
+const runJson = (prepareFn) => async (req, res, next) => {
+  try {
+    const { chatArgs, extra } = await prepareFn(req);
+    const result = await chat(chatArgs);
+    const { reply, references } = await resolveReferences({ reply: result.reply, userId: req.user.id });
     res.json({
       success: true,
-      data: {
-        reply: replyWithRefs, usage: result.usage, tool_calls: result.toolCalls,
-        effective_attachments: serializeAttachments(effective.attachmentList), references,
-      },
+      data: { reply, usage: result.usage, tool_calls: result.toolCalls, references, ...extra },
     });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ success: false, message: err.message });
     next(err);
   }
 };
+
+/**
+ * Chạy 1 lượt chat STREAMING qua SSE (text/event-stream). Mỗi sự kiện là 1 dòng
+ * `data: <json>\n\n` với field `type`:
+ *   - "delta" { text }                 — 1 đoạn text mới của câu trả lời.
+ *   - "tool"  { tool_call }            — 1 tool vừa chạy xong (name, args, result).
+ *   - "done"  { reply, references, usage, tool_calls, ...extra } — kết thúc.
+ *   - "error" { message }             — lỗi (gửi trong stream, HTTP vẫn 200).
+ *
+ * Lỗi lúc CHUẨN BỊ (trước khi mở stream) vẫn trả HTTP code chuẩn như runJson.
+ */
+const runStream = (prepareFn) => async (req, res, next) => {
+  let prepared;
+  try {
+    prepared = await prepareFn(req);
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ success: false, message: err.message });
+    return next(err);
+  }
+
+  res.setHeader('Content-Type',      'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control',     'no-cache, no-transform');
+  res.setHeader('Connection',        'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');   // tắt buffering của reverse proxy (nginx)
+  res.flushHeaders?.();
+
+  const send = (obj) => {
+    if (!res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  };
+
+  // Client ngắt kết nối giữa chừng → dừng đẩy thêm.
+  // QUAN TRỌNG: nghe trên `res`, KHÔNG phải `req`. Với POST có body,
+  // express.json() đọc hết body khiến request stream phát 'close' NGAY sau khi
+  // parse xong (chứ không phải khi client rời đi) → nếu nghe `req` thì `aborted`
+  // bật sớm và chặn mất delta text + done. `res` 'close' chỉ bật khi kết nối
+  // thực sự đóng.
+  let aborted = false;
+  res.on('close', () => { aborted = true; });
+
+  try {
+    const result = await chatStream({
+      ...prepared.chatArgs,
+      onDelta:    (text) => { if (!aborted) send({ type: 'delta', text }); },
+      onToolCall: (tc)   => { if (!aborted) send({ type: 'tool', tool_call: tc }); },
+    });
+    if (aborted) return;
+    const { reply, references } = await resolveReferences({ reply: result.reply, userId: req.user.id });
+    send({
+      type: 'done',
+      reply,
+      references,
+      usage:      result.usage,
+      tool_calls: result.toolCalls,
+      ...prepared.extra,
+    });
+  } catch (err) {
+    console.error('[ai/stream]', err);
+    send({ type: 'error', message: err.message || 'AI lỗi' });
+  } finally {
+    if (!res.writableEnded) res.end();
+  }
+};
+
+export const standaloneChat       = runJson(prepareStandalone);
+export const emailChat            = runJson(prepareEmail);
+export const newsChat             = runJson(prepareNews);
+
+export const standaloneChatStream = runStream(prepareStandalone);
+export const emailChatStream      = runStream(prepareEmail);
+export const newsChatStream       = runStream(prepareNews);

@@ -10,4 +10,9 @@ router.post('/chat',              ctrl.standaloneChat);
 router.post('/email-chat',        ctrl.emailChat);
 router.post('/news-chat',         ctrl.newsChat);
 
+// Streaming (SSE) — đẩy text deltas về client ngay khi model sinh ra.
+router.post('/chat/stream',       ctrl.standaloneChatStream);
+router.post('/email-chat/stream', ctrl.emailChatStream);
+router.post('/news-chat/stream',  ctrl.newsChatStream);
+
 export default router;
