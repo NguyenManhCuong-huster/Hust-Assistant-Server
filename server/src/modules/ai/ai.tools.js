@@ -300,7 +300,7 @@ export const TASK_TOOL_DECLARATIONS = [
 // ─────────────────────────────────────────────────────────────
 // System note — gắn kèm system instruction để model biết tool & tag
 // ─────────────────────────────────────────────────────────────
-export const buildToolSystemNote = ({ tags = [] } = {}) => {
+export const buildToolSystemNote = () => {
   const lines = [
     'Bạn có các tool sau:',
     '  - `create_task`: tạo 1 task đơn lẻ.',
@@ -312,6 +312,10 @@ export const buildToolSystemNote = ({ tags = [] } = {}) => {
     '  - `search_emails` + `get_email`: tra email CỦA CHÍNH user. Search trả list',
     '    tóm tắt, get_email lấy body đầy đủ 1 email cụ thể.',
     '  - `search_news` + `get_news`: tra tin tức / kế hoạch từ HUST CTT (public).',
+    '  - `get_grades`: xem KẾT QUẢ HỌC TẬP của user (GPA/CPA/xếp loại đã tính sẵn) để TƯ VẤN.',
+    '  - `search_tasks` + `get_task`: xem TASK/lịch của user. search_tasks trả list',
+    '    tóm tắt (lọc loại/trạng thái/khoảng ngày), get_task lấy chi tiết 1 task.',
+    '  - `get_tags`: lấy danh sách NHÃN (tag) của user kèm UUID — gọi TRƯỚC khi gán tag.',
     '  - `web_search`: tra web (search engine ngoài) cho thông tin THỜI SỰ / NGOÀI hệ thống.',
     `Hôm nay là ${new Date().toISOString()} (UTC). Múi giờ user: +07:00 (giờ VN).`,
     '',
@@ -345,6 +349,32 @@ export const buildToolSystemNote = ({ tags = [] } = {}) => {
     '    {A+,A,B+,B,C+,C,D+,D,F}; môn chưa có điểm thì bỏ trống.',
     '  - Server tự upsert theo (học kỳ + mã HP): trùng thì cập nhật, không tạo bản trùng.',
     '  - TUYỆT ĐỐI không bịa mã HP / số TC / điểm. Thiếu thông tin thì hỏi lại user.',
+    '',
+    'QUAN TRỌNG về `get_grades` (xem điểm để TƯ VẤN):',
+    '  - Khi user hỏi về điểm / GPA / CPA / xếp loại, hoặc xin tư vấn học tập cần dựa',
+    '    trên kết quả thực tế → GỌI `get_grades` LẤY SỐ LIỆU THẬT trước, KHÔNG phỏng đoán.',
+    '  - Server đã tính sẵn `cpa`, `classification`, GPA từng kỳ trong `by_semester`,',
+    '    tổng tín chỉ. DÙNG trực tiếp các số này — KHÔNG tự tính lại (tránh sai số học).',
+    '  - Lọc 1 kỳ qua `semester` ("<năm><kỳ>"); bỏ qua để lấy toàn bộ.',
+    '  - Khi tư vấn: chỉ ra môn điểm thấp (D/D+/F, grade_point thấp) để cải thiện, môn',
+    '    còn thiếu điểm (letter_grade = null), và gợi ý cụ thể, động viên tích cực.',
+    '  - Nếu tool trả rỗng (chưa nhập điểm) → khuyên user nhập điểm trước, đừng bịa CPA.',
+    '',
+    'QUAN TRỌNG về `search_tasks` / `get_task` (xem lịch / việc cần làm):',
+    '  - Khi user hỏi về lịch, deadline, việc cần làm, task đã tạo của họ → GỌI',
+    '    `search_tasks` LẤY DỮ LIỆU THẬT, KHÔNG phỏng đoán. Lọc bằng task_type',
+    '    (TODO/CLASS/EXAM), status (PENDING/COMPLETED/ALL) và from_date/to_date.',
+    '  - Câu hỏi theo mốc thời gian ("tuần này", "ngày mai", "sắp tới") → AI tự tính',
+    '    from_date/to_date (YYYY-MM-DD, giờ VN) rồi truyền vào.',
+    '  - Cần chi tiết 1 task cụ thể (mô tả, địa điểm) → `get_task` với task_id từ search.',
+    '  - KHÔNG bịa task_id — chỉ dùng id từ kết quả search_tasks liền trước.',
+    '',
+    'QUAN TRỌNG về `get_tags` + gán tag khi tạo task:',
+    '  - Tag KHÔNG còn liệt kê sẵn trong system instruction. Muốn gán tag cho task',
+    '    (`create_task` / `create_weekly_tasks`) → GỌI `get_tags` TRƯỚC để lấy UUID',
+    '    tag phù hợp, rồi truyền các UUID đó vào `tag_ids`.',
+    '  - Chỉ chọn tag PHÙ HỢP nội dung task. Không có tag hợp → bỏ qua tag_ids.',
+    '  - TUYỆT ĐỐI không bịa UUID tag. get_tags rỗng = user chưa tạo tag → không gán.',
     '',
     // MỚI 2026-06 — hướng dẫn dùng các tool tra cứu:
     'QUAN TRỌNG về `search_emails` / `search_news` / `web_search`:',
@@ -393,20 +423,6 @@ export const buildToolSystemNote = ({ tags = [] } = {}) => {
     '',
     buildReferenceSystemNote(),
   ];
-
-  if (tags.length > 0) {
-    lines.push('');
-    lines.push('Danh sách tag user đã tạo (truyền vào tag_ids để phân loại task):');
-    for (const t of tags) {
-      const color = t.color_hex ? ` ${t.color_hex}` : '';
-      lines.push(`  - ${t.id}: "${t.name}"${color}`);
-    }
-    lines.push('Pick 1 hoặc nhiều tag PHÙ HỢP với nội dung task.');
-    lines.push('Không phù hợp tag nào? Bỏ qua tag_ids — KHÔNG ép gán bừa, KHÔNG bịa UUID mới.');
-  } else {
-    lines.push('');
-    lines.push('User chưa tạo tag nào — không pass tag_ids khi tạo task.');
-  }
 
   return lines.join('\n');
 };

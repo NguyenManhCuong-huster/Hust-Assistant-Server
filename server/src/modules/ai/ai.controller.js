@@ -1,5 +1,4 @@
 import multer from 'multer';
-import { listTagsForAI }  from '../../dao/tags.dao.js';
 import { getUserProfile } from '../../dao/user.dao.js';
 import { getEmailAnchor, getThread } from '../../dao/emails.dao.js';
 import { getNewsById } from '../../dao/news.dao.js';
@@ -26,9 +25,9 @@ export const uploadMiddleware = upload.single('file');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const composeSystemInstruction = (callerInstruction, tags, profile) => {
+const composeSystemInstruction = (callerInstruction, profile) => {
   const userNote = buildUserInfoSystemNote(profile);
-  const toolNote = buildToolSystemNote({ tags });
+  const toolNote = buildToolSystemNote();
   const base = callerInstruction?.trim() || 'Bạn là trợ lý cá nhân, trả lời ngắn gọn và lịch sự bằng tiếng Việt.';
   return [userNote, toolNote, base].join('\n\n');
 };
@@ -168,8 +167,7 @@ const prepareStandalone = async (req) => {
   const messages          = normalizeMessages(req.body?.messages);
   const callerInstruction = req.body?.system_instruction ?? null;
 
-  const [tags, profile, effective] = await Promise.all([
-    listTagsForAI(req.user.id),
+  const [profile, effective] = await Promise.all([
     getUserProfile(req.user.id),
     collectEffectiveAttachments({ messages, userId: req.user.id }),
   ]);
@@ -189,7 +187,7 @@ const prepareStandalone = async (req) => {
   return {
     chatArgs: {
       messages,
-      systemInstruction: composeSystemInstruction(baseInstruction, tags, profile),
+      systemInstruction: composeSystemInstruction(baseInstruction, profile),
       tools:             TASK_TOOL_DECLARATIONS,
       toolExecutor:      makeTaskToolExecutor({ userId: req.user.id, sourceType: 'MANUAL', allowedAttachmentIds: effective.allowedIds }),
       inlineDataMap,
@@ -228,11 +226,11 @@ const prepareEmail = async (req) => {
     `effective=${effective.attachmentList.length} inline_images=${inlineDataMap.size} orphan_attached=${attachedSourceImageIds.length}`,
   );
 
-  const [tags, profile] = await Promise.all([listTagsForAI(req.user.id), getUserProfile(req.user.id)]);
+  const profile = await getUserProfile(req.user.id);
   return {
     chatArgs: {
       messages,
-      systemInstruction: composeSystemInstruction(buildEmailSystemInstruction(thread, effective.attachmentList), tags, profile),
+      systemInstruction: composeSystemInstruction(buildEmailSystemInstruction(thread, effective.attachmentList), profile),
       tools:             TASK_TOOL_DECLARATIONS,
       toolExecutor:      makeTaskToolExecutor({ userId: req.user.id, sourceType: 'EMAIL', sourceId: anchor.id, allowedAttachmentIds: effective.allowedIds }),
       inlineDataMap,
@@ -261,11 +259,11 @@ const prepareNews = async (req) => {
     `inline_images=${inlineDataMap.size} orphan_attached=${attachedSourceImageIds.length}`,
   );
 
-  const [tags, profile] = await Promise.all([listTagsForAI(req.user.id), getUserProfile(req.user.id)]);
+  const profile = await getUserProfile(req.user.id);
   return {
     chatArgs: {
       messages,
-      systemInstruction: composeSystemInstruction(buildNewsSystemInstruction(news, effective.attachmentList), tags, profile),
+      systemInstruction: composeSystemInstruction(buildNewsSystemInstruction(news, effective.attachmentList), profile),
       tools:             TASK_TOOL_DECLARATIONS,
       toolExecutor:      makeTaskToolExecutor({ userId: req.user.id, sourceType: 'NEWS', sourceId: news.id, allowedAttachmentIds: effective.allowedIds }),
       inlineDataMap,

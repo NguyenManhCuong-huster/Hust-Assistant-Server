@@ -266,10 +266,16 @@ CREATE INDEX idx_ttcr_tag_id ON "task_tag_cross_ref"(tag_id);
 -- Đồng bộ Last-Write-Wins do client xử lý ở repository (so sánh mod_time khi pull),
 -- giống hệt cơ chế của tags.
 --
--- KHÔNG đặt UNIQUE(user_id, semester, course_code): client tạo offline rồi push (POST)
--- sẽ được server cấp id mới; nếu vướng unique server trả 409 → record local kẹt dirty,
--- retry vô hạn. Thay vào đó client tự chặn trùng mã HP trong cùng học kỳ ở UI.
--- (Cùng triết lý offline-first đang dùng cho tags.)
+-- CHO PHÉP trùng (semester, course_code): 1 kỳ có thể có nhiều bản cùng mã học phần
+-- (học lại trong kỳ, nhập tay nhiều lần…). Vì vậy KHÔNG đặt unique natural-key.
+--
+-- CHỐNG NHÂN BẢN bằng IDEMPOTENCY KEY = chính `id` (PK). Hai nguồn ghi grade:
+--   • CLIENT (app): POST có kèm `id` (UUID do client sinh) → server DÙNG LUÔN id đó, KHÔNG
+--     cấp id mới. id client == id server vĩnh viễn → không bao giờ đứt liên kết, không cần
+--     reassign. insertGrade upsert ON CONFLICT (id) → POST lại CÙNG grade (race sync /
+--     self-heal đa thiết bị / retry) gộp về đúng 1 dòng. "Nhập mới" = id MỚI → bản trùng thật.
+--   • TOOL (AI import): POST KHÔNG kèm id → server tự sinh qua DEFAULT uuid_generate_v4().
+-- Xem note ở grades.dao.js (insertGrade).
 CREATE TABLE "grades" (
   id             UUID         PRIMARY KEY DEFAULT uuid_generate_v4(),
   user_id        UUID         REFERENCES "users"(id) ON DELETE CASCADE,

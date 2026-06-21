@@ -47,14 +47,6 @@ export const updateTag = async (id, fields) => {
   return r.rows[0];
 };
 
-export const listTagsForAI = async (userId) => {
-  const r = await query(
-    'SELECT id, name, color_hex FROM tags WHERE user_id=$1 AND is_deleted=FALSE ORDER BY name ASC',
-    [userId],
-  );
-  return r.rows;
-};
-
 export const softDeleteTag = async (id) => {
   const r = await query(
     `UPDATE tags SET is_deleted=TRUE, mod_time=CURRENT_TIMESTAMP

@@ -81,6 +81,19 @@ const truncateBody = (s, n) => {
 
 const isUuid = (s) => typeof s === 'string' && UUID_REGEX.test(s.trim());
 
+const TASK_TYPES = ['TODO', 'CLASS', 'EXAM'];
+
+// Subquery JSON gom tag (chưa xoá) của 1 task `t`. Dùng chung search_tasks + get_task.
+// pg trả cột json đã parse sẵn thành mảng JS object.
+const TASK_TAGS_SUBQUERY = `
+  COALESCE((
+    SELECT json_agg(json_build_object('id', tg.id, 'name', tg.name, 'color_hex', tg.color_hex)
+                    ORDER BY tg.name ASC)
+      FROM task_tag_cross_ref ttcr
+      JOIN tags tg ON tg.id = ttcr.tag_id AND tg.is_deleted = FALSE
+     WHERE ttcr.task_id = t.id AND ttcr.is_deleted = FALSE
+  ), '[]'::json)`;
+
 // ═════════════════════════════════════════════════════════════
 // TOOL DECLARATIONS — passed to Gemini functionDeclarations
 // ═════════════════════════════════════════════════════════════
@@ -213,6 +226,123 @@ const getNewsDeclaration = {
   },
 };
 
+const getGradesDeclaration = {
+  name: 'get_grades',
+  description:
+    'Xem KẾT QUẢ HỌC TẬP (bảng điểm) của CHÍNH user đang chat để PHÂN TÍCH / TƯ VẤN. ' +
+    'Server tự tính sẵn GPA từng kỳ, CPA tích luỹ, tổng tín chỉ và xếp loại học lực ' +
+    '(thang 4) — KHÔNG cần bạn tự tính (tránh sai số học).\n\n' +
+    'KHI NÀO GỌI:\n' +
+    '  - User hỏi về điểm / GPA / CPA / xếp loại / kết quả học tập của họ.\n' +
+    '  - User xin TƯ VẤN học tập cần dựa trên điểm thực tế: "kỳ này tôi nên cải thiện môn ' +
+    'nào", "CPA của tôi bao nhiêu", "tôi cần điểm gì để đạt loại Giỏi", "môn nào tôi học kém".\n' +
+    '  - Trước khi đưa lời khuyên học tập, GỌI tool này để có số liệu thật thay vì phỏng đoán.\n\n' +
+    'KHÔNG dùng để GHI điểm — ghi điểm dùng `create_grade` / `create_grades`.\n\n' +
+    'Có thể lọc theo 1 học kỳ cụ thể qua `semester` (mã HUST "<năm><kỳ>", vd "20251"); ' +
+    'bỏ qua để lấy TOÀN BỘ các kỳ. Nếu user chưa nhập điểm nào, tool trả danh sách rỗng — ' +
+    'hãy gợi ý user nhập điểm trước (qua create_grades hoặc màn Kết quả học tập).',
+  parameters: {
+    type: 'object',
+    properties: {
+      semester: {
+        type: 'string',
+        description:
+          'Lọc theo 1 học kỳ HUST "<năm><kỳ>" (vd "20251" = năm 2025-2026 kỳ 1). ' +
+          'OPTIONAL — bỏ qua để lấy điểm tất cả các kỳ.',
+      },
+    },
+  },
+};
+
+// ─────────────────────────────────────────────────────────────
+// MỚI 2026-06: 3 tool XEM task + tag của CHÍNH user.
+//   - search_tasks : list task (lọc loại / trạng thái / khoảng ngày / từ khoá).
+//   - get_task     : drill-down 1 task → chi tiết đầy đủ + tag + địa điểm.
+//   - get_tags     : danh sách nhãn (UUID) — gọi TRƯỚC khi gán tag vào create_task.
+// Đều tuân thủ: scope user_id, lọc is_deleted=FALSE, KHÔNG trả user_id.
+// ─────────────────────────────────────────────────────────────
+const searchTasksDeclaration = {
+  name: 'search_tasks',
+  description:
+    'Xem các TASK (việc cần làm / lịch học CLASS / lịch thi EXAM) của CHÍNH user đang ' +
+    'chat. Trả danh sách tóm tắt, sắp theo thời gian TĂNG DẦN (sắp tới trước).\n\n' +
+    'KHI NÀO GỌI:\n' +
+    '  - User hỏi về lịch / việc cần làm / deadline của họ. Ví dụ: "tuần này tôi có ' +
+    'lịch gì", "còn deadline nào sắp tới không", "thứ 5 có buổi học nào", "tôi đã ' +
+    'tạo task nào về môn AI chưa".\n' +
+    '  - Trước khi tư vấn sắp xếp thời gian / nhắc lịch → GỌI để lấy dữ liệu thật.\n\n' +
+    'Trả TÓM TẮT mỗi task: id, title, mô tả ngắn, start_time, end_time, task_type, ' +
+    'is_completed, tags. Cần chi tiết đầy đủ 1 task → gọi tiếp `get_task` với `task_id`.\n\n' +
+    'Lọc theo `from_date`/`to_date` áp lên thời điểm task (start_time, hoặc end_time ' +
+    'nếu task không có start). Bỏ qua hết để lấy task gần thời điểm hiện tại nhất.',
+  parameters: {
+    type: 'object',
+    properties: {
+      query: {
+        type: 'string',
+        description:
+          'Từ khóa tìm trong title / description (case-insensitive). OPTIONAL.',
+      },
+      task_type: {
+        type: 'string',
+        enum: ['TODO', 'CLASS', 'EXAM'],
+        description: 'Lọc theo loại task. OPTIONAL — bỏ qua để lấy cả 3 loại.',
+      },
+      status: {
+        type: 'string',
+        enum: ['PENDING', 'COMPLETED', 'ALL'],
+        description:
+          'PENDING = chưa hoàn thành, COMPLETED = đã xong, ALL = cả hai. Default ALL.',
+      },
+      from_date: {
+        type: 'string',
+        description:
+          'Chỉ lấy task có thời điểm TỪ ngày này (ISO "YYYY-MM-DD" hoặc datetime). Optional.',
+      },
+      to_date: {
+        type: 'string',
+        description: 'Chỉ lấy task có thời điểm ĐẾN ngày này (inclusive, ISO). Optional.',
+      },
+      limit: {
+        type: 'integer',
+        description: 'Số kết quả tối đa, 1-30. Default 10.',
+      },
+    },
+  },
+};
+
+const getTaskDeclaration = {
+  name: 'get_task',
+  description:
+    'Lấy chi tiết ĐẦY ĐỦ của 1 task: title, description, start_time, end_time, ' +
+    'task_type, is_completed, độ ưu tiên, địa điểm, nguồn tạo, tags.\n\n' +
+    'Dùng SAU KHI `search_tasks` đã trả kết quả và bạn cần đọc kỹ 1 task cụ thể.\n\n' +
+    'CHỈ gọi với `task_id` đã thấy trong kết quả `search_tasks` trước đó — KHÔNG bịa UUID.',
+  parameters: {
+    type: 'object',
+    properties: {
+      task_id: {
+        type: 'string',
+        description: 'UUID task, copy NGUYÊN VĂN từ kết quả search_tasks.',
+      },
+    },
+    required: ['task_id'],
+  },
+};
+
+const getTagsDeclaration = {
+  name: 'get_tags',
+  description:
+    'Lấy danh sách NHÃN (tag) mà CHÍNH user đang chat đã tạo. Trả id (UUID), name, ' +
+    'color_hex — đã loại tag đã xoá.\n\n' +
+    'KHI NÀO GỌI:\n' +
+    '  - User hỏi họ có những tag nào.\n' +
+    '  - TRƯỚC KHI gán tag vào `create_task` / `create_weekly_tasks`: gọi để lấy ' +
+    'đúng UUID tag phù hợp rồi mới truyền vào `tag_ids`. TUYỆT ĐỐI không bịa UUID.\n\n' +
+    'Không cần tham số. Nếu trả rỗng → user chưa tạo tag nào, đừng truyền tag_ids.',
+  parameters: { type: 'object', properties: {} },
+};
+
 const webSearchDeclaration = {
   name: 'web_search',
   description:
@@ -247,6 +377,10 @@ export const SEARCH_TOOL_DECLARATIONS = [
   getEmailDeclaration,
   searchNewsDeclaration,
   getNewsDeclaration,
+  getGradesDeclaration,
+  searchTasksDeclaration,
+  getTaskDeclaration,
+  getTagsDeclaration,
   webSearchDeclaration,
 ];
 
@@ -571,6 +705,143 @@ const execGetNews = async ({ args }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// get_grades — xem kết quả học tập + GPA/CPA để AI tư vấn.
+//
+// Server TỰ tính (LLM hay sai số học): GPA mỗi kỳ, CPA tích luỹ, tổng tín chỉ,
+// xếp loại học lực theo thang 4 HUST. Trả về cấu trúc gọn để model tư vấn.
+// ─────────────────────────────────────────────────────────────
+
+// Quy đổi điểm chữ → điểm hệ 4 theo thang HUST. F = 0 (vẫn tính vào mẫu GPA).
+const GRADE_POINTS_4 = {
+  'A+': 4.0, A: 4.0, 'B+': 3.5, B: 3.0,
+  'C+': 2.5, C: 2.0, 'D+': 1.5, D: 1.0, F: 0.0,
+};
+
+/** Xếp loại học lực theo CPA thang 4 (quy chế HUST). */
+const classifyCpa = (cpa) => {
+  if (cpa === null) return null;
+  if (cpa >= 3.6) return 'Xuất sắc';
+  if (cpa >= 3.2) return 'Giỏi';
+  if (cpa >= 2.5) return 'Khá';
+  if (cpa >= 2.0) return 'Trung bình';
+  if (cpa >= 1.0) return 'Trung bình yếu';
+  return 'Kém';
+};
+
+const round2 = (n) => Math.round(n * 100) / 100;
+
+/** Cộng dồn 1 học phần vào accumulator GPA/tín chỉ. */
+const makeAccumulator = () => ({
+  qualityPoints: 0,   // Σ(điểm hệ 4 × tín chỉ) — chỉ môn có điểm & TC>0
+  gpaCredits:    0,   // Σ tín chỉ tính vào GPA (đã có điểm, gồm cả F)
+  earnedCredits: 0,   // Σ tín chỉ ĐẠT (điểm ≥ D, TC>0)
+  gradedCourses: 0,   // số môn đã có điểm (gồm cả F)
+});
+
+const accumulate = (acc, credits, letter) => {
+  const point = GRADE_POINTS_4[letter];
+  if (point === undefined) return;            // chưa có điểm → bỏ qua khỏi GPA
+  acc.gradedCourses += 1;
+  if (credits > 0) {
+    acc.qualityPoints += point * credits;
+    acc.gpaCredits    += credits;
+    if (letter !== 'F') acc.earnedCredits += credits;
+  }
+};
+
+const gpaOf = (acc) => (acc.gpaCredits > 0 ? round2(acc.qualityPoints / acc.gpaCredits) : null);
+
+const execGetGrades = async ({ userId, args }) => {
+  if (!userId) return { success: false, error: 'Thiếu user context.' };
+
+  const semFilter = String(args?.semester ?? '').trim();
+  const params    = [userId];
+  let where = 'user_id = $1 AND is_deleted = FALSE';
+  if (semFilter) {
+    where += ' AND semester = $2';
+    params.push(semFilter);
+  }
+
+  try {
+    const r = await query(
+      `SELECT semester, course_code, course_name, course_name_en, credits, letter_grade
+         FROM grades
+        WHERE ${where}
+        ORDER BY semester ASC, course_code ASC`,
+      params,
+    );
+
+    if (r.rows.length === 0) {
+      return {
+        success: true,
+        effective_params: { semester: semFilter || null },
+        total_courses: 0,
+        summary: { cpa: null, classification: null },
+        by_semester: [],
+        message: semFilter
+          ? `User chưa có điểm nào cho học kỳ ${semFilter}.`
+          : 'User chưa nhập kết quả học tập nào. Gợi ý user nhập điểm trước khi tư vấn.',
+      };
+    }
+
+    // Gom theo học kỳ + tính accumulator tổng.
+    const semMap  = new Map();   // semester → { courses[], acc }
+    const overall = makeAccumulator();
+
+    for (const row of r.rows) {
+      const credits = Number(row.credits) || 0;
+      const letter  = row.letter_grade || null;
+
+      if (!semMap.has(row.semester)) {
+        semMap.set(row.semester, { courses: [], acc: makeAccumulator() });
+      }
+      const bucket = semMap.get(row.semester);
+      bucket.courses.push({
+        course_code:    row.course_code,
+        course_name:    row.course_name,
+        course_name_en: row.course_name_en || null,
+        credits,
+        letter_grade:   letter,          // null = chưa có điểm
+        grade_point:    letter !== null && GRADE_POINTS_4[letter] !== undefined
+          ? GRADE_POINTS_4[letter] : null,
+      });
+      accumulate(bucket.acc, credits, letter);
+      accumulate(overall, credits, letter);
+    }
+
+    const by_semester = [...semMap.entries()].map(([semester, { courses, acc }]) => ({
+      semester,
+      gpa:            gpaOf(acc),
+      credits_earned: acc.earnedCredits,
+      credits_in_gpa: acc.gpaCredits,
+      course_count:   courses.length,
+      graded_count:   acc.gradedCourses,
+      courses,
+    }));
+
+    const cpa = gpaOf(overall);
+
+    return {
+      success: true,
+      effective_params: { semester: semFilter || null },   // null = tất cả các kỳ
+      total_courses: r.rows.length,
+      summary: {
+        cpa,                                                // điểm trung bình tích luỹ (thang 4), null nếu chưa môn nào có điểm
+        classification:          classifyCpa(cpa),          // xếp loại học lực theo CPA
+        total_credits_earned:    overall.earnedCredits,     // TC đã đạt (điểm ≥ D)
+        total_credits_in_gpa:    overall.gpaCredits,        // TC dùng tính CPA (gồm cả F)
+        graded_courses:          overall.gradedCourses,     // số môn đã có điểm
+        ungraded_courses:        r.rows.length - overall.gradedCourses,
+        semester_count:          by_semester.length,
+      },
+      by_semester,
+    };
+  } catch (err) {
+    return { success: false, error: err.message ?? String(err) };
+  }
+};
+
+// ─────────────────────────────────────────────────────────────
 // web_search — Tavily Search API
 //
 // Doc: https://docs.tavily.com/documentation/api-reference/endpoint/search
@@ -680,6 +951,168 @@ const execWebSearch = async ({ args }) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────
+// search_tasks — list task của user (lọc loại/trạng thái/ngày/từ khoá).
+// ─────────────────────────────────────────────────────────────
+const execSearchTasks = async ({ userId, args }) => {
+  if (!userId) return { success: false, error: 'Thiếu user context.' };
+
+  const q         = String(args?.query     ?? '').trim();
+  const typeRaw   = String(args?.task_type ?? '').toUpperCase().trim();
+  const statusRaw = String(args?.status    ?? 'ALL').toUpperCase().trim();
+  const fromDate  = String(args?.from_date ?? '').trim();
+  const toDate    = String(args?.to_date   ?? '').trim();
+  const limit     = safeLimit(args?.limit);
+
+  const conditions = ['t.user_id = $1', 't.is_deleted = FALSE'];
+  const params     = [userId];
+  let i = 2;
+
+  if (q) {
+    conditions.push(`(t.title ILIKE $${i} OR t.description ILIKE $${i})`);
+    params.push(`%${q}%`);
+    i++;
+  }
+  const typeFilter = TASK_TYPES.includes(typeRaw) ? typeRaw : null;
+  if (typeFilter) {
+    conditions.push(`t.task_type = $${i++}`);
+    params.push(typeFilter);
+  }
+  const statusFilter = ['PENDING', 'COMPLETED'].includes(statusRaw) ? statusRaw : 'ALL';
+  if (statusFilter === 'PENDING')   conditions.push('t.is_completed = FALSE');
+  if (statusFilter === 'COMPLETED') conditions.push('t.is_completed = TRUE');
+  if (fromDate) {
+    conditions.push(`COALESCE(t.start_time, t.end_time) >= $${i++}`);
+    params.push(fromDate);
+  }
+  if (toDate) {
+    conditions.push(`COALESCE(t.start_time, t.end_time) <= $${i++}`);
+    params.push(toDate);
+  }
+
+  params.push(limit);
+
+  try {
+    const r = await query(
+      `SELECT t.id, t.title, t.description, t.start_time, t.end_time, t.task_type,
+              t.is_completed, ${TASK_TAGS_SUBQUERY} AS tags
+         FROM tasks t
+        WHERE ${conditions.join(' AND ')}
+        ORDER BY COALESCE(t.start_time, t.end_time) ASC NULLS LAST, t.mod_time DESC
+        LIMIT $${i}`,
+      params,
+    );
+
+    return {
+      success: true,
+      count:   r.rows.length,
+      effective_params: {
+        query:     q || null,            // null = KHÔNG lọc từ khóa
+        task_type: typeFilter,           // null = cả TODO/CLASS/EXAM
+        status:    statusFilter,         // ALL = cả chưa xong lẫn đã xong
+        from_date: fromDate || null,     // null = KHÔNG giới hạn ngày bắt đầu
+        to_date:   toDate || null,       // null = KHÔNG giới hạn ngày kết thúc
+        limit,                           // số task tối đa lấy về (mặc định 10)
+        sort:      'thời gian tăng dần (sắp tới trước)',
+      },
+      results: r.rows.map((row) => ({
+        id:           row.id,
+        title:        row.title,
+        description:  truncatePreview(row.description),
+        start_time:   row.start_time,
+        end_time:     row.end_time,
+        task_type:    row.task_type,
+        is_completed: row.is_completed,
+        tags:         row.tags ?? [],
+      })),
+    };
+  } catch (err) {
+    return { success: false, error: err.message ?? String(err) };
+  }
+};
+
+// ─────────────────────────────────────────────────────────────
+// get_task — chi tiết đầy đủ 1 task.
+// ─────────────────────────────────────────────────────────────
+const execGetTask = async ({ userId, args }) => {
+  if (!userId) return { success: false, error: 'Thiếu user context.' };
+
+  const taskId = String(args?.task_id ?? '').trim();
+  if (!isUuid(taskId)) {
+    return {
+      success: false,
+      error:   'task_id không hợp lệ — phải là UUID lấy từ kết quả search_tasks.',
+    };
+  }
+
+  try {
+    const r = await query(
+      `SELECT t.id, t.title, t.description, t.start_time, t.end_time, t.task_type,
+              t.is_completed, t.priority, t.address_name, t.source_type,
+              ${TASK_TAGS_SUBQUERY} AS tags
+         FROM tasks t
+        WHERE t.id = $1 AND t.user_id = $2 AND t.is_deleted = FALSE`,
+      [taskId, userId],
+    );
+    const task = r.rows[0];
+    if (!task) {
+      return {
+        success: false,
+        error:   'Task không tồn tại hoặc không có quyền truy cập.',
+      };
+    }
+
+    return {
+      success: true,
+      effective_params: { task_id: taskId },
+      task: {
+        id:           task.id,
+        title:        task.title,
+        description:  task.description,
+        start_time:   task.start_time,
+        end_time:     task.end_time,
+        task_type:    task.task_type,
+        is_completed: task.is_completed,
+        priority:     task.priority,
+        address_name: task.address_name,
+        source_type:  task.source_type,
+        tags:         task.tags ?? [],
+      },
+    };
+  } catch (err) {
+    return { success: false, error: err.message ?? String(err) };
+  }
+};
+
+// ─────────────────────────────────────────────────────────────
+// get_tags — danh sách nhãn của user (lấy UUID để gán cho task).
+// ─────────────────────────────────────────────────────────────
+const execGetTags = async ({ userId }) => {
+  if (!userId) return { success: false, error: 'Thiếu user context.' };
+
+  try {
+    const r = await query(
+      `SELECT id, name, color_hex
+         FROM tags
+        WHERE user_id = $1 AND is_deleted = FALSE
+        ORDER BY name ASC`,
+      [userId],
+    );
+
+    return {
+      success: true,
+      count:   r.rows.length,
+      tags:    r.rows.map((t) => ({
+        id:        t.id,
+        name:      t.name,
+        color_hex: t.color_hex,
+      })),
+    };
+  } catch (err) {
+    return { success: false, error: err.message ?? String(err) };
+  }
+};
+
 // ═════════════════════════════════════════════════════════════
 // Dispatcher — aiTools.js gọi vào đây.
 //
@@ -697,6 +1130,14 @@ export const dispatchSearchTool = async (toolName, args, { userId }) => {
       return { handled: true, result: await execSearchNews({ args }) };
     case 'get_news':
       return { handled: true, result: await execGetNews({ args }) };
+    case 'get_grades':
+      return { handled: true, result: await execGetGrades({ userId, args }) };
+    case 'search_tasks':
+      return { handled: true, result: await execSearchTasks({ userId, args }) };
+    case 'get_task':
+      return { handled: true, result: await execGetTask({ userId, args }) };
+    case 'get_tags':
+      return { handled: true, result: await execGetTags({ userId }) };
     case 'web_search':
       return { handled: true, result: await execWebSearch({ args }) };
     default:

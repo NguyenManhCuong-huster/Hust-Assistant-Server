@@ -27,11 +27,12 @@ export const pushSync = async (req, res, next) => {
   try {
     const { tasks = [], tags = [] } = req.body;
     if (!Array.isArray(tasks) || !Array.isArray(tags)) {
-      return res.status(400).json({ success: false, message: 'tasks và tags phải là array.' });
+      return res.status(400).json({ success: false, message: 'tasks, tags phải là array.' });
     }
 
-    const server_time                 = await svc.getServerTime();
-    const { taskResults, tagResults } = await svc.pushChanges(req.user.id, tasks, tags);
+    const server_time = await svc.getServerTime();
+    const { taskResults, tagResults } =
+      await svc.pushChanges(req.user.id, { tasks, tags });
 
     const allResults = [...taskResults, ...tagResults];
     res.json({
@@ -41,7 +42,8 @@ export const pushSync = async (req, res, next) => {
       meta: {
         tasks_processed: tasks.length,
         tags_processed:  tags.length,
-        conflicts:       allResults.filter((r) => r.status === 'conflict').length,
+        // "stale" = client cũ hơn/bằng server (server thắng) → client cần pull.
+        stale:           allResults.filter((r) => r.status === 'stale').length,
       },
     });
   } catch (err) { next(err); }
