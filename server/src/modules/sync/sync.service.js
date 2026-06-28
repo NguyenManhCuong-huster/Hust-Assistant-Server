@@ -211,7 +211,7 @@ const reconcileTaskTags = async (client, userId, taskId, tagIds, modTime) => {
 
 const insertTaskRow = async (client, userId, item) => {
   const r = await client.query(
-    `INSERT INTO tasks
+    `INSERT INTO tasks AS t
        (id, user_id, title, description, start_time, end_time, task_type,
         source_type, source_id, priority, latitude, longitude, address_name,
         is_completed, is_deleted, mod_time)
@@ -231,7 +231,7 @@ const insertTaskRow = async (client, userId, item) => {
 
 const updateTaskRow = async (client, userId, item) => {
   const r = await client.query(
-    `UPDATE tasks SET
+    `UPDATE tasks AS t SET
        title=$1, description=$2, start_time=$3, end_time=$4, task_type=$5,
        is_completed=$6, source_type=$7, source_id=$8,
        priority=COALESCE($9, priority), latitude=$10, longitude=$11, address_name=$12,
